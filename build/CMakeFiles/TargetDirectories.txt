@@ -1,0 +1,7 @@
+/Users/ruilinyan/Documents/Vdc-del/build/CMakeFiles/vdc-del.dir
+/Users/ruilinyan/Documents/Vdc-del/build/CMakeFiles/edit_cache.dir
+/Users/ruilinyan/Documents/Vdc-del/build/CMakeFiles/rebuild_cache.dir
+/Users/ruilinyan/Documents/Vdc-del/build/CMakeFiles/list_install_components.dir
+/Users/ruilinyan/Documents/Vdc-del/build/CMakeFiles/install.dir
+/Users/ruilinyan/Documents/Vdc-del/build/CMakeFiles/install/local.dir
+/Users/ruilinyan/Documents/Vdc-del/build/CMakeFiles/install/strip.dir
