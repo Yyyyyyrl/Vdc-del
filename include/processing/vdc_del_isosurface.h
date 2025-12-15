@@ -170,4 +170,77 @@ int find_cycle_containing_facet(
  */
 Point project_to_sphere(const Point& point, const Point& center, double radius);
 
+//! @brief Clips an isovertex to the circumscribed sphere of a cube.
+/*!
+ * If the isovertex lies outside the circumscribed sphere centered at the cube center,
+ * it is projected onto the sphere surface along the direction from center to isovertex.
+ *
+ * @param isovertex The isosurface vertex (centroid) to potentially clip.
+ * @param cube_center The center of the active cube (Delaunay vertex).
+ * @param cube_side_length The side length of the active cube.
+ * @return The clipped isovertex (same as input if already inside sphere).
+ */
+Point clip_isovertex_to_circumscribed_sphere(
+    const Point& isovertex,
+    const Point& cube_center,
+    double cube_side_length
+);
+
+// ============================================================================
+// Step 9.b-c: Self-Intersection Detection and Resolution
+// ============================================================================
+
+//! @brief Check if cycle isovertex positions create self-intersecting triangles.
+/*!
+ * For a multi-cycle vertex, checks if any triangles from different cycles
+ * intersect each other. Uses CGAL's do_intersect for Triangle_3 objects.
+ *
+ * @param v Handle to the Delaunay vertex with multiple cycles
+ * @param cycle_isovertices Proposed isovertex positions for each cycle
+ * @param dt The Delaunay triangulation
+ * @return true if any triangles from different cycles intersect
+ */
+bool check_self_intersection(
+    Vertex_handle v,
+    const std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt
+);
+
+//! @brief Compute appropriate sphere radius for projecting cycle isovertices.
+/*!
+ * Computes a sphere radius based on the minimum incident edge length
+ * of the vertex, using a fraction (0.1) to keep isovertices close to
+ * the Delaunay vertex while providing separation.
+ *
+ * @param v Handle to the Delaunay vertex
+ * @param dt The Delaunay triangulation
+ * @param grid The scalar field grid (used as fallback)
+ * @return Sphere radius for projection
+ */
+double compute_sphere_radius(
+    Vertex_handle v,
+    const Delaunay& dt,
+    const UnifiedGrid& grid
+);
+
+//! @brief Resolve self-intersection by adjusting isovertex positions.
+/*!
+ * Attempts to resolve self-intersections between cycles by:
+ * 1. Projecting all cycle centroids onto a sphere around the vertex
+ * 2. Checking angular separation and redistributing if too close
+ * 3. Falling back to placing all isovertices at the vertex center
+ *    if self-intersection persists
+ *
+ * @param v Handle to the Delaunay vertex
+ * @param cycle_isovertices [in/out] Isovertex positions to adjust
+ * @param dt The Delaunay triangulation
+ * @param sphere_radius Radius of the sphere for projection
+ */
+void resolve_self_intersection(
+    Vertex_handle v,
+    std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt,
+    double sphere_radius
+);
+
 #endif // VDC_DEL_ISOSURFACE_H

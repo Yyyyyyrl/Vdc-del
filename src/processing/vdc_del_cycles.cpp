@@ -9,6 +9,8 @@
 #include "core/vdc_debug.h"
 #include <unordered_set>
 #include <unordered_map>
+#include <CGAL/Triangle_3.h>
+#include <CGAL/intersections.h>
 
 // ============================================================================
 // Helper: Build cell index lookup
@@ -264,6 +266,362 @@ Point project_to_sphere(const Point& point, const Point& center, double radius) 
     );
 }
 
+//! @brief Clips an isovertex to the circumscribed sphere of a cube.
+/*!
+ * If the isovertex lies outside the circumscribed sphere centered at the cube center,
+ * it is projected onto the sphere surface along the direction from center to isovertex.
+ * The circumscribed radius is half the cube side length (approximation for stability).
+ *
+ * @param isovertex The isosurface vertex (centroid) to potentially clip.
+ * @param cube_center The center of the active cube (Delaunay vertex).
+ * @param cube_side_length The side length of the active cube.
+ * @return The clipped isovertex (same as input if already inside sphere).
+ */
+Point clip_isovertex_to_circumscribed_sphere(
+    const Point& isovertex,
+    const Point& cube_center,
+    double cube_side_length
+) {
+    // Use half the cube side length as the circumscribed radius
+    // (This is a conservative approximation; true circumscribed radius is sqrt(3)/2 * side)
+    const double circumscribed_radius = 0.5 * cube_side_length;
+
+    // Vector from cube center to isovertex
+    double dx = isovertex.x() - cube_center.x();
+    double dy = isovertex.y() - cube_center.y();
+    double dz = isovertex.z() - cube_center.z();
+    double distance = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    // If isovertex is outside the circumscribed sphere, project it onto the sphere
+    if (distance > circumscribed_radius) {
+        // Normalize direction and scale to sphere radius
+        double scale = circumscribed_radius / distance;
+        return Point(
+            cube_center.x() + dx * scale,
+            cube_center.y() + dy * scale,
+            cube_center.z() + dz * scale
+        );
+    }
+
+    return isovertex;
+}
+
+// ============================================================================
+// Step 9.b-c: Self-Intersection Detection and Resolution
+// ============================================================================
+
+//! @brief CGAL Triangle_3 type for intersection tests
+typedef K::Triangle_3 Triangle_3;
+
+//! @brief Collect all triangles that would be generated for a specific cycle
+/*!
+ * For each facet in the cycle, determines the triangle vertices using the
+ * cycle's isovertex and the isovertices of the other two Delaunay vertices.
+ *
+ * @param dt The Delaunay triangulation
+ * @param v The vertex whose cycle we're examining
+ * @param cycle_idx Index of the cycle within v's facet_cycles
+ * @param cycle_isovertex The isovertex position for this cycle
+ * @param cell_map Map from cell indices to cell handles
+ * @return Vector of Triangle_3 objects for this cycle
+ */
+static std::vector<Triangle_3> collect_cycle_triangles(
+    const Delaunay& dt,
+    Vertex_handle v,
+    int cycle_idx,
+    const Point& cycle_isovertex,
+    const std::unordered_map<int, Cell_handle>& cell_map
+) {
+    std::vector<Triangle_3> triangles;
+    const auto& cycles = v->info().facet_cycles;
+
+    if (cycle_idx < 0 || cycle_idx >= static_cast<int>(cycles.size())) {
+        return triangles;
+    }
+
+    const auto& cycle_facets = cycles[cycle_idx];
+
+    for (const auto& [cell_idx, facet_idx] : cycle_facets) {
+        auto it = cell_map.find(cell_idx);
+        if (it == cell_map.end()) continue;
+
+        Cell_handle ch = it->second;
+
+        // Get the 3 vertices of this facet (excluding the one opposite to facet_idx)
+        std::vector<Vertex_handle> facet_verts;
+        for (int j = 0; j < 4; ++j) {
+            if (j != facet_idx) {
+                facet_verts.push_back(ch->vertex(j));
+            }
+        }
+
+        // Find the two vertices that are not v
+        std::vector<Vertex_handle> other_verts;
+        for (auto vh : facet_verts) {
+            if (vh != v) {
+                other_verts.push_back(vh);
+            }
+        }
+
+        if (other_verts.size() != 2) continue;
+
+        // Get isovertex positions for the other two vertices
+        // These vertices may also have cycles - we need to find which cycle
+        // contains this facet for each vertex
+        Point p1 = cycle_isovertex; // Our cycle's isovertex
+
+        // For the other vertices, find their isovertex for the cycle containing this facet
+        Point p2, p3;
+        bool found_p2 = false, found_p3 = false;
+
+        Vertex_handle v1 = other_verts[0];
+        Vertex_handle v2 = other_verts[1];
+
+        // Find cycle for v1 containing this facet
+        int c1 = find_cycle_containing_facet(v1, cell_idx, facet_idx);
+        if (c1 >= 0 && c1 < static_cast<int>(v1->info().cycle_isovertices.size())) {
+            p2 = v1->info().cycle_isovertices[c1];
+            found_p2 = true;
+        }
+
+        // Find cycle for v2 containing this facet
+        int c2 = find_cycle_containing_facet(v2, cell_idx, facet_idx);
+        if (c2 >= 0 && c2 < static_cast<int>(v2->info().cycle_isovertices.size())) {
+            p3 = v2->info().cycle_isovertices[c2];
+            found_p3 = true;
+        }
+
+        // Only create triangle if we found all three vertices
+        if (found_p2 && found_p3) {
+            triangles.push_back(Triangle_3(p1, p2, p3));
+        }
+    }
+
+    return triangles;
+}
+
+//! @brief Check if two triangles intersect (excluding shared edges/vertices)
+/*!
+ * Uses CGAL's do_intersect for Triangle_3 objects.
+ * Returns true if the triangles have a non-trivial intersection
+ * (i.e., more than just touching at shared vertices).
+ */
+static bool triangles_have_nontrivial_intersection(
+    const Triangle_3& t1,
+    const Triangle_3& t2
+) {
+    // Check if triangles share any vertices
+    std::set<Point, std::less<Point>> t1_verts = {t1.vertex(0), t1.vertex(1), t1.vertex(2)};
+    int shared_count = 0;
+    for (int i = 0; i < 3; ++i) {
+        if (t1_verts.count(t2.vertex(i)) > 0) {
+            shared_count++;
+        }
+    }
+
+    // If triangles share 2 or more vertices, they share an edge - this is expected
+    // and not a self-intersection in the problematic sense
+    if (shared_count >= 2) {
+        return false;
+    }
+
+    // Use CGAL's intersection test
+    return CGAL::do_intersect(t1, t2);
+}
+
+bool check_self_intersection(
+    Vertex_handle v,
+    const std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt
+) {
+    const auto& cycles = v->info().facet_cycles;
+    size_t num_cycles = cycles.size();
+
+    if (num_cycles < 2) {
+        return false; // No self-intersection possible with single cycle
+    }
+
+    // Build cell map for quick lookup
+    std::unordered_map<int, Cell_handle> cell_map;
+    for (auto cit = dt.finite_cells_begin(); cit != dt.finite_cells_end(); ++cit) {
+        cell_map[cit->info().index] = cit;
+    }
+
+    // Temporarily set the cycle isovertices for triangle collection
+    // (Save original values to restore later if needed)
+    std::vector<Point> original_isovertices = v->info().cycle_isovertices;
+
+    // Note: We need to use a const_cast here because we're checking with proposed positions
+    // In the actual integration, the values will already be set
+    auto& mutable_isovertices = const_cast<std::vector<Point>&>(v->info().cycle_isovertices);
+    mutable_isovertices = cycle_isovertices;
+
+    // Collect triangles for each cycle
+    std::vector<std::vector<Triangle_3>> cycle_triangles(num_cycles);
+    for (size_t c = 0; c < num_cycles; ++c) {
+        cycle_triangles[c] = collect_cycle_triangles(
+            dt, v, static_cast<int>(c), cycle_isovertices[c], cell_map);
+    }
+
+    // Restore original isovertices
+    mutable_isovertices = original_isovertices;
+
+    // Check all pairs of cycles for intersection
+    for (size_t i = 0; i < num_cycles; ++i) {
+        for (size_t j = i + 1; j < num_cycles; ++j) {
+            // Check if any triangle from cycle i intersects any triangle from cycle j
+            for (const auto& t1 : cycle_triangles[i]) {
+                for (const auto& t2 : cycle_triangles[j]) {
+                    if (triangles_have_nontrivial_intersection(t1, t2)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
+double compute_sphere_radius(
+    Vertex_handle v,
+    const Delaunay& dt,
+    const UnifiedGrid& grid
+) {
+    // Compute minimum incident edge length
+    double min_edge_length = std::numeric_limits<double>::max();
+
+    // Get all edges incident to v by examining incident cells
+    std::set<Vertex_handle> neighbor_vertices;
+    std::vector<Cell_handle> incident_cells;
+    dt.incident_cells(v, std::back_inserter(incident_cells));
+
+    for (Cell_handle ch : incident_cells) {
+        if (dt.is_infinite(ch)) continue;
+
+        for (int i = 0; i < 4; ++i) {
+            Vertex_handle vh = ch->vertex(i);
+            if (vh != v && !vh->info().is_dummy && !dt.is_infinite(vh)) {
+                neighbor_vertices.insert(vh);
+            }
+        }
+    }
+
+    Point p = v->point();
+    for (Vertex_handle vh : neighbor_vertices) {
+        Point q = vh->point();
+        double dx = p.x() - q.x();
+        double dy = p.y() - q.y();
+        double dz = p.z() - q.z();
+        double dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+        min_edge_length = std::min(min_edge_length, dist);
+    }
+
+    // Also consider grid spacing as a fallback
+    double grid_spacing = std::min({grid.spacing[0], grid.spacing[1], grid.spacing[2]});
+
+    if (min_edge_length == std::numeric_limits<double>::max()) {
+        min_edge_length = grid_spacing;
+    }
+
+    // Use a fraction of the minimum edge length
+    // 0.1 provides enough separation while keeping isovertices close to the Delaunay vertex
+    return 0.1 * min_edge_length;
+}
+
+//! @brief Compute minimum angular separation between points on a sphere
+static double compute_min_angular_separation(
+    const std::vector<Point>& points,
+    const Point& center
+) {
+    if (points.size() < 2) return 2.0 * M_PI; // Maximum separation for single point
+
+    double min_angle = 2.0 * M_PI;
+
+    for (size_t i = 0; i < points.size(); ++i) {
+        for (size_t j = i + 1; j < points.size(); ++j) {
+            // Compute vectors from center to each point
+            Vector3 v1(center, points[i]);
+            Vector3 v2(center, points[j]);
+
+            double len1 = std::sqrt(v1.squared_length());
+            double len2 = std::sqrt(v2.squared_length());
+
+            if (len1 < 1e-10 || len2 < 1e-10) continue;
+
+            // Compute angle between vectors
+            double dot = (v1.x() * v2.x() + v1.y() * v2.y() + v1.z() * v2.z()) / (len1 * len2);
+            dot = std::max(-1.0, std::min(1.0, dot)); // Clamp for numerical stability
+            double angle = std::acos(dot);
+
+            min_angle = std::min(min_angle, angle);
+        }
+    }
+
+    return min_angle;
+}
+
+//! @brief Redistribute points evenly on a sphere
+/*!
+ * Places points at evenly distributed positions on the sphere.
+ * Uses a simple approach: distribute along a great circle for 2 points,
+ * or use vertices of a regular polyhedron for more points.
+ */
+static void redistribute_on_sphere(
+    std::vector<Point>& points,
+    const Point& center,
+    double radius
+) {
+    int n = static_cast<int>(points.size());
+    if (n < 2) return;
+
+    // For simplicity, distribute points evenly around a great circle
+    // More sophisticated methods could use spherical Fibonacci or other distributions
+    for (int i = 0; i < n; ++i) {
+        double theta = 2.0 * M_PI * i / n;
+        double x = center.x() + radius * std::cos(theta);
+        double y = center.y() + radius * std::sin(theta);
+        double z = center.z();
+        points[i] = Point(x, y, z);
+    }
+}
+
+void resolve_self_intersection(
+    Vertex_handle v,
+    std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt,
+    double sphere_radius
+) {
+    Point center = v->point();
+    int n = static_cast<int>(cycle_isovertices.size());
+
+    if (n < 2) return;
+
+    // Step 1: Project all centroids onto sphere
+    for (int i = 0; i < n; ++i) {
+        cycle_isovertices[i] = project_to_sphere(cycle_isovertices[i], center, sphere_radius);
+    }
+
+    // Step 2: Check minimum angular separation
+    double min_angle = compute_min_angular_separation(cycle_isovertices, center);
+    double required_angle = 2.0 * M_PI / (3.0 * n); // Heuristic threshold
+
+    // Step 3: If too close, redistribute on sphere
+    if (min_angle < required_angle) {
+        redistribute_on_sphere(cycle_isovertices, center, sphere_radius);
+    }
+
+    // Step 4: Verify no self-intersection; if still intersecting, fall back to vertex position
+    if (check_self_intersection(v, cycle_isovertices, dt)) {
+        // Fallback: place all isovertices at vertex center
+        DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
+                    << ": fallback to center position after sphere projection failed");
+        for (int i = 0; i < n; ++i) {
+            cycle_isovertices[i] = center;
+        }
+    }
+}
+
 void compute_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
@@ -274,9 +632,17 @@ void compute_cycle_isovertices(
 
     int single_cycle_count = 0;
     int multi_cycle_count = 0;
+    int clipped_count = 0;
+    int self_intersection_detected = 0;
+    int self_intersection_resolved = 0;
+    int self_intersection_fallback = 0;
+
+    // Get cube side length from grid spacing (assumes uniform spacing)
+    double cube_side_length = std::min({grid.spacing[0], grid.spacing[1], grid.spacing[2]});
 
     for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
         if (!vit->info().active) continue;
+        if (vit->info().is_dummy) continue;
 
         auto& cycles = vit->info().facet_cycles;
         auto& isovertices = vit->info().cycle_isovertices;
@@ -285,27 +651,58 @@ void compute_cycle_isovertices(
 
         isovertices.resize(cycles.size());
 
+        Point cube_center = vit->point();
+
         if (cycles.size() == 1) {
-            // Single cycle: isovertex at vertex location (or isov if position_on_isov)
-            if (position_on_isov) {
-                // Use the pre-computed accurate iso-crossing point
-                isovertices[0] = vit->info().isov;
-            } else {
-                // Use the Delaunay vertex position
-                isovertices[0] = vit->point();
-            }
+            // Single cycle: use the Delaunay vertex position (cube center)
+            // This provides stability and keeps vertices well-separated
+            isovertices[0] = cube_center;
             single_cycle_count++;
         } else {
-            // Multiple cycles: compute centroids for each cycle
+            // Multiple cycles: compute centroids for each cycle and clip to circumscribed sphere
             for (size_t c = 0; c < cycles.size(); ++c) {
                 Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
                     dt, grid, isovalue, vit, cycles[c]);
 
-                // For multi-cycle vertices, we could optionally project the centroid
-                // onto a sphere around the vertex. For now, just use the centroid directly.
-                // In the future, self-intersection check (Step 9.b-c) would be added here.
-                isovertices[c] = centroid;
+                // Clip centroid to circumscribed sphere around cube center
+                Point clipped = clip_isovertex_to_circumscribed_sphere(
+                    centroid, cube_center, cube_side_length);
+
+                // Track if clipping occurred
+                if (clipped.x() != centroid.x() || clipped.y() != centroid.y() || clipped.z() != centroid.z()) {
+                    clipped_count++;
+                }
+
+                isovertices[c] = clipped;
             }
+
+            // Step 9.b: Check for self-intersection
+            if (check_self_intersection(vit, isovertices, dt)) {
+                self_intersection_detected++;
+
+                // Step 9.c: Resolve self-intersection
+                double radius = compute_sphere_radius(vit, dt, grid);
+                resolve_self_intersection(vit, isovertices, dt, radius);
+
+                // Check if resolution resulted in fallback (all at center)
+                bool all_at_center = true;
+                for (const auto& pos : isovertices) {
+                    double dx = pos.x() - cube_center.x();
+                    double dy = pos.y() - cube_center.y();
+                    double dz = pos.z() - cube_center.z();
+                    if (dx*dx + dy*dy + dz*dz > 1e-10) {
+                        all_at_center = false;
+                        break;
+                    }
+                }
+
+                if (all_at_center) {
+                    self_intersection_fallback++;
+                } else {
+                    self_intersection_resolved++;
+                }
+            }
+
             multi_cycle_count++;
         }
     }
@@ -313,6 +710,17 @@ void compute_cycle_isovertices(
     DEBUG_PRINT("[DEL-ISOV] Computed isovertices for "
                 << single_cycle_count << " single-cycle and "
                 << multi_cycle_count << " multi-cycle vertices");
+
+    if (clipped_count > 0) {
+        DEBUG_PRINT("[DEL-ISOV] Clipped " << clipped_count << " isovertices to circumscribed sphere");
+    }
+
+    if (self_intersection_detected > 0) {
+        DEBUG_PRINT("[DEL-SELFI] Self-intersection stats: "
+                    << self_intersection_detected << " detected, "
+                    << self_intersection_resolved << " resolved by sphere projection, "
+                    << self_intersection_fallback << " using fallback (center position)");
+    }
 }
 
 // ============================================================================
