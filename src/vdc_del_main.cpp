@@ -11,6 +11,7 @@
 #include "processing/vdc_grid.h"
 #include "processing/vdc_func.h"
 #include "processing/vdc_del_isosurface.h"
+#include "processing/vdc_sep_isov.h"
 #include "vdc_io.h"
 
 #include <iostream>
@@ -96,8 +97,23 @@ int main(int argc, char* argv[]) {
     // ========================================================================
     // Step 4b: Optional separation (if -sep_dist/-sep_split specified)
     // ========================================================================
-    // Note: Separation code would go here if enabled
-    // For now, we skip separation in the initial implementation
+    if (param.sep) {
+        TimingStats::getInstance().startTimer("Separation", "Total");
+        std::cout << "\nSeparating active cubes (sep_dist=" << param.sep_dist
+                  << ", sep_split=" << param.sep_split << ")...\n";
+
+        std::vector<Cube> separated = separate_active_cubes(
+            activeCubes, grid, param.isovalue, param.sep_dist, param.sep_split);
+        activeCubes.swap(separated);
+
+        std::cout << "  Remaining cubes after separation: " << activeCubes.size() << "\n";
+        TimingStats::getInstance().stopTimer("Separation", "Total");
+
+        if (activeCubes.empty()) {
+            std::cerr << "Error: Separation removed all active cubes.\n";
+            return 1;
+        }
+    }
 
     // ========================================================================
     // Step 5: Construct Delaunay triangulation
@@ -123,14 +139,20 @@ int main(int argc, char* argv[]) {
     std::cout << "  Delaunay vertices: " << dt.number_of_vertices() << "\n";
     std::cout << "  Delaunay cells: " << dt.number_of_finite_cells() << "\n";
 
-    // Store iso-crossing points in vertex info if using position_delv_on_isov
-    if (param.position_delv_on_isov) {
-        int idx = 0;
-        std::vector<Point> isoCrossings = get_cube_accurate_iso_crossing_points(activeCubes);
-        for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
-            if (!vit->info().is_dummy && idx < (int)isoCrossings.size()) {
-                vit->info().isov = isoCrossings[idx++];
-            }
+    // Store per-site isosurface sample points in vertex info.
+    // `info().index` is assigned by `construct_delaunay_triangulation` and matches
+    // the active-cube list order for non-dummy vertices.
+    const std::vector<Point> isoCrossings = get_cube_accurate_iso_crossing_points(activeCubes);
+    for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
+        if (vit->info().is_dummy) {
+            continue;
+        }
+        const int site_idx = vit->info().index;
+        if (site_idx >= 0 && static_cast<size_t>(site_idx) < isoCrossings.size()) {
+            vit->info().isov = isoCrossings[static_cast<size_t>(site_idx)];
+        } else {
+            // Fallback (should not happen): use the Delaunay site itself.
+            vit->info().isov = vit->point();
         }
     }
 
