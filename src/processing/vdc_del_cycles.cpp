@@ -222,7 +222,9 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
 
         // Linear interpolation to find isosurface crossing point
         // p = ((isovalue - sB) * wA + (sA - isovalue) * wB) / (sA - sB)
-        float t = (isovalue - sB) / denom;
+        //
+        // Using p = wA + t * (wB - wA) gives t = (sA - isovalue) / (sA - sB).
+        float t = (sA - isovalue) / denom;
 
         // Clamp t to [0, 1] for safety
         t = std::max(0.0f, std::min(1.0f, t));
@@ -632,13 +634,9 @@ void compute_cycle_isovertices(
 
     int single_cycle_count = 0;
     int multi_cycle_count = 0;
-    int clipped_count = 0;
     int self_intersection_detected = 0;
     int self_intersection_resolved = 0;
     int self_intersection_fallback = 0;
-
-    // Get cube side length from grid spacing (assumes uniform spacing)
-    double cube_side_length = std::min({grid.spacing[0], grid.spacing[1], grid.spacing[2]});
 
     for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
         if (!vit->info().active) continue;
@@ -654,26 +652,20 @@ void compute_cycle_isovertices(
         Point cube_center = vit->point();
 
         if (cycles.size() == 1) {
-            // Single cycle: use the Delaunay vertex position (cube center)
-            // This provides stability and keeps vertices well-separated
-            isovertices[0] = cube_center;
+            // Single cycle: use the isosurface sample point associated with this site.
+            // When `-position_delv_on_isov` is enabled, this equals `cube_center`.
+            (void)position_on_isov; // the choice is encoded in `vit->info().isov`
+            isovertices[0] = vit->info().isov;
             single_cycle_count++;
         } else {
-            // Multiple cycles: compute centroids for each cycle and clip to circumscribed sphere
+            // Multiple cycles: compute centroids and project them to a sphere around the site.
+            // This gives directional separation between cycles.
+            const double sphere_radius = compute_sphere_radius(vit, dt, grid);
             for (size_t c = 0; c < cycles.size(); ++c) {
                 Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
                     dt, grid, isovalue, vit, cycles[c]);
 
-                // Clip centroid to circumscribed sphere around cube center
-                Point clipped = clip_isovertex_to_circumscribed_sphere(
-                    centroid, cube_center, cube_side_length);
-
-                // Track if clipping occurred
-                if (clipped.x() != centroid.x() || clipped.y() != centroid.y() || clipped.z() != centroid.z()) {
-                    clipped_count++;
-                }
-
-                isovertices[c] = clipped;
+                isovertices[c] = project_to_sphere(centroid, cube_center, sphere_radius);
             }
 
             // Step 9.b: Check for self-intersection
@@ -681,8 +673,7 @@ void compute_cycle_isovertices(
                 self_intersection_detected++;
 
                 // Step 9.c: Resolve self-intersection
-                double radius = compute_sphere_radius(vit, dt, grid);
-                resolve_self_intersection(vit, isovertices, dt, radius);
+                resolve_self_intersection(vit, isovertices, dt, sphere_radius);
 
                 // Check if resolution resulted in fallback (all at center)
                 bool all_at_center = true;
@@ -710,10 +701,6 @@ void compute_cycle_isovertices(
     DEBUG_PRINT("[DEL-ISOV] Computed isovertices for "
                 << single_cycle_count << " single-cycle and "
                 << multi_cycle_count << " multi-cycle vertices");
-
-    if (clipped_count > 0) {
-        DEBUG_PRINT("[DEL-ISOV] Clipped " << clipped_count << " isovertices to circumscribed sphere");
-    }
 
     if (self_intersection_detected > 0) {
         DEBUG_PRINT("[DEL-SELFI] Self-intersection stats: "
