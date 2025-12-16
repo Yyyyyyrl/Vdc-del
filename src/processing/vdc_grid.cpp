@@ -448,16 +448,78 @@ Point adjust_outside_bound_points(const Point &p, const UnifiedGrid &grid, const
 
 
 // Helper function to compute iso-crossing point in an active cube
-// Note: Using cube center for stability. Edge-based centroids can cause
-// degenerate Delaunay configurations when adjacent cubes share edge crossings.
+// Returns the centroid of edge/isovalue intersections (fallback: cube center).
+// Note: The Delaunay site can still be chosen independently (e.g., cube center
+// vs iso-crossing) via higher-level options such as `-position_delv_on_isov`.
 Point compute_iso_crossing_point(const UnifiedGrid &grid, int i, int j, int k, float isovalue)
 {
-    // Return cube center - this ensures all points are distinct and well-separated,
-    // avoiding degeneracies in the Delaunay triangulation
-    return Point(
-        (i + 0.5f) * grid.spacing[0] + grid.min_coord[0],
-        (j + 0.5f) * grid.spacing[1] + grid.min_coord[1],
-        (k + 0.5f) * grid.spacing[2] + grid.min_coord[2]);
+    static const int cubeVertices[8][3] = {
+        {0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+        {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}
+    };
+    static const int cubeEdges[12][2] = {
+        {0, 1}, {1, 2}, {2, 3}, {3, 0},
+        {4, 5}, {5, 6}, {6, 7}, {7, 4},
+        {0, 4}, {1, 5}, {2, 6}, {3, 7}
+    };
+
+    const float dx = grid.spacing[0];
+    const float dy = grid.spacing[1];
+    const float dz = grid.spacing[2];
+    const float min_x = grid.min_coord[0];
+    const float min_y = grid.min_coord[1];
+    const float min_z = grid.min_coord[2];
+
+    const float base_x = i * dx + min_x;
+    const float base_y = j * dy + min_y;
+    const float base_z = k * dz + min_z;
+
+    std::array<Point, 8> vertices;
+    std::array<float, 8> scalarValues;
+    for (int v = 0; v < 8; ++v)
+    {
+        vertices[v] = Point(
+            base_x + cubeVertices[v][0] * dx,
+            base_y + cubeVertices[v][1] * dy,
+            base_z + cubeVertices[v][2] * dz);
+        scalarValues[v] = grid.get_value(
+            i + cubeVertices[v][0],
+            j + cubeVertices[v][1],
+            k + cubeVertices[v][2]);
+    }
+
+    std::vector<Point> intersectionPoints;
+    intersectionPoints.reserve(12);
+    for (const auto &edge : cubeEdges)
+    {
+        const int idx1 = edge[0];
+        const int idx2 = edge[1];
+        const float val1 = scalarValues[idx1];
+        const float val2 = scalarValues[idx2];
+
+        if ((val1 < isovalue && val2 >= isovalue) || (val1 >= isovalue && val2 < isovalue))
+        {
+            intersectionPoints.push_back(
+                interpolate(vertices[idx1], vertices[idx2], val1, val2, isovalue, grid));
+        }
+    }
+
+    if (!intersectionPoints.empty())
+    {
+        double cx = 0.0, cy = 0.0, cz = 0.0;
+        for (const auto &pt : intersectionPoints)
+        {
+            cx += pt.x();
+            cy += pt.y();
+            cz += pt.z();
+        }
+        const double inv = 1.0 / static_cast<double>(intersectionPoints.size());
+        return Point(cx * inv, cy * inv, cz * inv);
+    }
+
+    return Point(base_x + 0.5f * dx,
+                 base_y + 0.5f * dy,
+                 base_z + 0.5f * dz);
 }
 
 // Find active cubes
