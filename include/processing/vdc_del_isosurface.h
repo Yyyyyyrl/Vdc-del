@@ -118,13 +118,15 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
 
 //! @brief Compute isosurface vertex positions for each cycle around each active vertex.
 /*!
- * For single-cycle vertices: position at vertex location (or isov if -position_delv_on_isov)
- * For multi-cycle vertices: compute centroid of Voronoi edge intersections for each cycle
+ * For single-cycle vertices: position at the site-associated isosurface sample (`v.info().isov`).
+ *   When `-position_delv_on_isov` is enabled, this equals the Delaunay site location.
+ * For multi-cycle vertices: compute the centroid of Voronoi-edge/isovalue intersections per cycle
+ *   and project the centroid direction onto a sphere around the Delaunay site.
  *
  * @param dt The Delaunay triangulation (must have cycles computed first)
  * @param grid The scalar field grid
  * @param isovalue The isovalue threshold
- * @param position_on_isov If true, use accurate iso-crossing point for single-cycle vertices
+ * @param position_on_isov If true, Delaunay sites are on isosurface samples (reflected in `v.info().isov`)
  */
 void compute_cycle_isovertices(
     Delaunay& dt,

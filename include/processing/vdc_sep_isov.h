@@ -33,7 +33,7 @@ std::vector<Cube> separate_active_cubes(
 //! @brief Compute accurate iso-crossing point using edge-intersection centroids
 /*!
  * Finds all edge-isovalue intersections and returns their centroid.
- * Used for separation logic, not for Delaunay triangulation.
+ * Used for separation logic and for locating isosurface sample points within a cube.
  *
  * @param grid The scalar grid
  * @param i,j,k Cube indices
