@@ -13,8 +13,8 @@
 //! @brief Unified separation of active cubes parameterized by distance and splits.
 /*!
  * Applies greedy selection in a refined grid of factor (K+1) with clearance
- * measured in subcubes. Cube centers are snapped to power-of-two fractions
- * based on K to reduce floating-point error.
+ * measured in subcubes. Cube centers are snapped to refined subgrid centers;
+ * when (K+1) is a power of two, these offsets are binary-friendly.
  *
  * @param activeCubes Input vector of active cubes (modified by sorting)
  * @param grid Scalar grid metadata
