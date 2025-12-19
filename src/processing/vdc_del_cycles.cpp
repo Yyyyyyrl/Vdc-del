@@ -187,13 +187,9 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
     const UnifiedGrid& grid,
     float isovalue,
     Vertex_handle v_handle,
-    const std::vector<std::pair<int, int>>& cycle_facets
+    const std::vector<std::pair<int, int>>& cycle_facets,
+    const std::unordered_map<int, Cell_handle>& cell_map
 ) {
-    // Build cell lookup map
-    std::unordered_map<int, Cell_handle> cell_map;
-    for (auto cit = dt.finite_cells_begin(); cit != dt.finite_cells_end(); ++cit) {
-        cell_map[cit->info().index] = cit;
-    }
 
     double cx = 0, cy = 0, cz = 0;
     int numI = 0;
@@ -638,6 +634,10 @@ void compute_cycle_isovertices(
     int self_intersection_resolved = 0;
     int self_intersection_fallback = 0;
 
+    // Build cell lookup map ONCE for the entire function (performance fix)
+    std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
+
+    // Pass 1: compute initial isovertices for all active vertices.
     for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
         if (!vit->info().active) continue;
         if (vit->info().is_dummy) continue;
@@ -663,38 +663,47 @@ void compute_cycle_isovertices(
             const double sphere_radius = compute_sphere_radius(vit, dt, grid);
             for (size_t c = 0; c < cycles.size(); ++c) {
                 Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
-                    dt, grid, isovalue, vit, cycles[c]);
+                    dt, grid, isovalue, vit, cycles[c], cell_map);
 
                 isovertices[c] = project_to_sphere(centroid, cube_center, sphere_radius);
             }
+            multi_cycle_count++;
+        }
+    }
 
-            // Step 9.b: Check for self-intersection
-            if (check_self_intersection(vit, isovertices, dt)) {
-                self_intersection_detected++;
+    // Pass 2: resolve self-intersections after all isovertices are assigned.
+    for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
+        if (!vit->info().active) continue;
+        if (vit->info().is_dummy) continue;
 
-                // Step 9.c: Resolve self-intersection
-                resolve_self_intersection(vit, isovertices, dt, sphere_radius);
+        auto& cycles = vit->info().facet_cycles;
+        auto& isovertices = vit->info().cycle_isovertices;
 
-                // Check if resolution resulted in fallback (all at center)
-                bool all_at_center = true;
-                for (const auto& pos : isovertices) {
-                    double dx = pos.x() - cube_center.x();
-                    double dy = pos.y() - cube_center.y();
-                    double dz = pos.z() - cube_center.z();
-                    if (dx*dx + dy*dy + dz*dz > 1e-10) {
-                        all_at_center = false;
-                        break;
-                    }
-                }
+        if (cycles.size() < 2) continue;
 
-                if (all_at_center) {
-                    self_intersection_fallback++;
-                } else {
-                    self_intersection_resolved++;
+        if (check_self_intersection(vit, isovertices, dt)) {
+            self_intersection_detected++;
+
+            const double sphere_radius = compute_sphere_radius(vit, dt, grid);
+            resolve_self_intersection(vit, isovertices, dt, sphere_radius);
+
+            const Point cube_center = vit->point();
+            bool all_at_center = true;
+            for (const auto& pos : isovertices) {
+                double dx = pos.x() - cube_center.x();
+                double dy = pos.y() - cube_center.y();
+                double dz = pos.z() - cube_center.z();
+                if (dx*dx + dy*dy + dz*dz > 1e-10) {
+                    all_at_center = false;
+                    break;
                 }
             }
 
-            multi_cycle_count++;
+            if (all_at_center) {
+                self_intersection_fallback++;
+            } else {
+                self_intersection_resolved++;
+            }
         }
     }
 
