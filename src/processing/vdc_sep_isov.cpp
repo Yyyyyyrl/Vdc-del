@@ -151,19 +151,17 @@ static int determine_subgrid_index(
     return loc_out[0] + factor * loc_out[1] + factor * factor * loc_out[2];
 }
 
-//! @brief Allowed offsets per split count (binary-friendly fractions)
+//! @brief Allowed offsets per split count (subgrid centers).
 static std::vector<float> allowed_offsets(int sep_split) {
-    if (sep_split <= 0) {
-        return {0.5f};
+    const int factor = std::max(1, sep_split + 1);
+    std::vector<float> offsets;
+    offsets.reserve(static_cast<size_t>(factor));
+    for (int idx = 0; idx < factor; ++idx) {
+        const float num = 2.0f * static_cast<float>(idx) + 1.0f;
+        const float den = 2.0f * static_cast<float>(factor);
+        offsets.push_back(num / den);
     }
-    if (sep_split == 1) {
-        return {0.25f, 0.5f, 0.75f};
-    }
-    if (sep_split == 2 || sep_split == 3) {
-        return {0.125f, 0.5f, 0.875f};
-    }
-    // K >= 4
-    return {1.0f / 16.0f, 5.0f / 16.0f, 0.5f, 11.0f / 16.0f, 15.0f / 16.0f};
+    return offsets;
 }
 
 //! @brief Snap a relative offset to nearest allowed fraction
@@ -181,7 +179,7 @@ static float quantize_offset(float raw_offset, int sep_split) {
     return std::max(0.0f, std::min(1.0f, snapped));
 }
 
-//! @brief Compute cube center snapped to power-of-two fractions
+//! @brief Compute cube center snapped to refined subgrid centers
 static Point compute_snapped_center(
     const Cube &cube,
     const UnifiedGrid &grid,
