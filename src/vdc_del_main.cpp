@@ -127,8 +127,10 @@ int main(int argc, char* argv[]) {
     // Get cube centers for Delaunay vertices
     std::vector<Point> cubeCenters = get_cube_centers(activeCubes);
 
-    // If position_delv_on_isov, use accurate iso-crossing points instead
-    if (param.position_delv_on_isov) {
+    // Use accurate iso-crossing points when explicitly requested or when
+    // separation uses a refined subgrid (keeps site selection consistent).
+    const bool use_isov_sites = param.position_delv_on_isov || (param.sep && param.sep_split > 0);
+    if (use_isov_sites) {
         cubeCenters = get_cube_accurate_iso_crossing_points(activeCubes);
     }
 
