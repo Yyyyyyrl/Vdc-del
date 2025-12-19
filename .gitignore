@@ -1,0 +1,81 @@
+# Build directories
+build/
+build-clang/
+build-gcc/
+cmake-build-*/
+.claude/
+data/
+
+# Compiled Object files
+*.o
+*.obj
+*.lo
+*.slo
+
+# Compiled Static libraries
+*.a
+*.lib
+*.la
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+vdc
+test_vor
+test_modcyc
+
+# Test results and output files
+test_results/
+benchmark_results/
+bipolar_test_results/
+*.off
+*.ply
+*.csv
+
+# Python virtual environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Temporary and backup files
+*.tmp
+*.bak
+*.log
+
+# NRRD test data (large files)
+*.nrrd
+*.nhdr
+
+# Documentation build output
+volvis/
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Library directories (dependencies)
+Library/
