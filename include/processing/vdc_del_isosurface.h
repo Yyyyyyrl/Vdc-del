@@ -205,7 +205,8 @@ Point clip_isovertex_to_circumscribed_sphere(
 bool check_self_intersection(
     Vertex_handle v,
     const std::vector<Point>& cycle_isovertices,
-    const Delaunay& dt
+    const Delaunay& dt,
+    const std::unordered_map<int, Cell_handle>& cell_map
 );
 
 //! @brief Compute appropriate sphere radius for projecting cycle isovertices.
@@ -242,7 +243,8 @@ void resolve_self_intersection(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    double sphere_radius
+    double sphere_radius,
+    const std::unordered_map<int, Cell_handle>& cell_map
 );
 
 #endif // VDC_DEL_ISOSURFACE_H
