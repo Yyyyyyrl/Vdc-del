@@ -76,6 +76,11 @@ int main(int argc, char* argv[]) {
         TimingStats::getInstance().stopTimer("Supersample", "Total");
     }
 
+    if (grid.boundary_crosses_isovalue(param.isovalue)) {
+        grid.zero_boundary_shell();
+        std::cout << "[INFO] Clamped boundary voxels to minimum scalar value.\n";
+    }
+
     // ========================================================================
     // Step 4: Find active cubes
     // ========================================================================
