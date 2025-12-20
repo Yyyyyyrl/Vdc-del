@@ -430,7 +430,8 @@ static bool triangles_have_nontrivial_intersection(
 bool check_self_intersection(
     Vertex_handle v,
     const std::vector<Point>& cycle_isovertices,
-    const Delaunay& dt
+    const Delaunay& dt,
+    const std::unordered_map<int, Cell_handle>& cell_map
 ) {
     const auto& cycles = v->info().facet_cycles;
     size_t num_cycles = cycles.size();
@@ -439,11 +440,7 @@ bool check_self_intersection(
         return false; // No self-intersection possible with single cycle
     }
 
-    // Build cell map for quick lookup
-    std::unordered_map<int, Cell_handle> cell_map;
-    for (auto cit = dt.finite_cells_begin(); cit != dt.finite_cells_end(); ++cit) {
-        cell_map[cit->info().index] = cit;
-    }
+    // Cell map is now passed in - no need to rebuild it!
 
     // Temporarily set the cycle isovertices for triangle collection
     // (Save original values to restore later if needed)
@@ -588,7 +585,8 @@ void resolve_self_intersection(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    double sphere_radius
+    double sphere_radius,
+    const std::unordered_map<int, Cell_handle>& cell_map
 ) {
     Point center = v->point();
     int n = static_cast<int>(cycle_isovertices.size());
@@ -610,7 +608,7 @@ void resolve_self_intersection(
     }
 
     // Step 4: Verify no self-intersection; if still intersecting, fall back to vertex position
-    if (check_self_intersection(v, cycle_isovertices, dt)) {
+    if (check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
         // Fallback: place all isovertices at vertex center
         DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
                     << ": fallback to center position after sphere projection failed");
@@ -681,11 +679,11 @@ void compute_cycle_isovertices(
 
         if (cycles.size() < 2) continue;
 
-        if (check_self_intersection(vit, isovertices, dt)) {
+        if (check_self_intersection(vit, isovertices, dt, cell_map)) {
             self_intersection_detected++;
 
             const double sphere_radius = compute_sphere_radius(vit, dt, grid);
-            resolve_self_intersection(vit, isovertices, dt, sphere_radius);
+            resolve_self_intersection(vit, isovertices, dt, sphere_radius, cell_map);
 
             const Point cube_center = vit->point();
             bool all_at_center = true;
