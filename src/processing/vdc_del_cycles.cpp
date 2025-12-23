@@ -84,7 +84,6 @@ static Cell_handle cell_between_facet_and_next_facet(
     const Facet& facet0,
     const Facet& facet1
 ) {
-    // Mirrors the outline in vdc-cycles-DelaunayBased.txt
     // Common cell between consecutive facets is either facet0.first or facet1.first.
     const Facet facet1_mirror = dt.mirror_facet(facet1);
     if (facet0.first == facet1_mirror.first) {
@@ -112,7 +111,7 @@ static std::optional<FacetKey> oriented_isosurface_facet_key(const Delaunay& dt,
     }
 
     if (cell0_pos) {
-        // Our global convention: represent an isosurface facet by (positive_cell, facet_index).
+        // represent an isosurface facet by (positive_cell, facet_index).
         return FacetKey{cell0->info().index, facet_index0};
     }
 
@@ -167,9 +166,7 @@ static std::vector<std::pair<FacetKey, FacetKey>> compute_edge_bipolar_matching(
     BIPOLAR_MATCH_METHOD method,
     const std::unordered_map<int, Cell_handle>& cell_map
 ) {
-    // This implements the "match facets containing edge" outline in vdc-cycles-DelaunayBased.txt.
-    // The resulting pairs represent non-crossing consecutive pairing around the Voronoi facet
-    // dual to this Delaunay edge.
+
     Delaunay::Facet_circulator fc_start = dt.incident_facets(edge);
     if (fc_start == Delaunay::Facet_circulator()) {
         return {};
@@ -467,11 +464,9 @@ void compute_facet_cycles(Delaunay& dt) {
                         applied_matching = true;
                         ambiguous_edges_matched++;
                     } else {
-                        // Roll back partial matching edges by clearing and falling back to clique.
-                        // (We don't track which adj entries were added, so just don't accept it.)
+                        // Roll back partial matching edges by clearing and falling back to clique, should never happen though.
                         applied_matching = false;
-                        // Note: adjacency may now contain partial entries; we'll rebuild clique below
-                        // by ensuring all pairs are connected. The additional edges do not harm.
+                        DEBUG_PRINT("Rolling back partial matching edges\n");
                     }
                 }
             }
@@ -652,7 +647,7 @@ Point clip_isovertex_to_circumscribed_sphere(
     double cube_side_length
 ) {
     // Use half the cube side length as the circumscribed radius
-    // (This is a conservative approximation; true circumscribed radius is sqrt(3)/2 * side)
+    // (conservative approximation; true circumscribed radius is sqrt(3)/2 * side)
     const double circumscribed_radius = 0.5 * cube_side_length;
 
     // Vector from cube center to isovertex
@@ -735,7 +730,7 @@ static std::vector<Triangle_3> collect_cycle_triangles(
         if (other_verts.size() != 2) continue;
 
         // Get isovertex positions for the other two vertices
-        // These vertices may also have cycles - we need to find which cycle
+        // These vertices may also have cycles - need to find which cycle
         // contains this facet for each vertex
         Point p1 = cycle_isovertex; // This cycle's isovertex
 
@@ -760,7 +755,7 @@ static std::vector<Triangle_3> collect_cycle_triangles(
             found_p3 = true;
         }
 
-        // Only create triangle if we found all three vertices
+        // Only create triangle if found all three vertices
         if (found_p2 && found_p3) {
             triangles.push_back(Triangle_3(p1, p2, p3));
         }
@@ -810,14 +805,8 @@ bool check_self_intersection(
         return false; // No self-intersection possible with single cycle
     }
 
-    // Cell map is now passed in - no need to rebuild it!
-
-    // Temporarily set the cycle isovertices for triangle collection
-    // (Save original values to restore later if needed)
     std::vector<Point> original_isovertices = v->info().cycle_isovertices;
 
-    // Note: We need to use a const_cast here because we're checking with proposed positions
-    // In the actual integration, the values will already be set
     auto& mutable_isovertices = const_cast<std::vector<Point>&>(v->info().cycle_isovertices);
     mutable_isovertices = cycle_isovertices;
 
