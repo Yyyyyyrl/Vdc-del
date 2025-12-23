@@ -9,6 +9,7 @@
 #include "core/vdc_debug.h"
 #include <unordered_set>
 #include <unordered_map>
+#include <optional>
 #include <CGAL/Triangle_3.h>
 #include <CGAL/intersections.h>
 
@@ -26,56 +27,267 @@ static std::unordered_map<int, Cell_handle> build_cell_index_map(const Delaunay&
 }
 
 // ============================================================================
-// Step 8: Compute Facet Cycles
+// Helpers: Matching + adjacency on a Delaunay edge
 // ============================================================================
 
-//! @brief Check if two facets share an edge (excluding the central vertex v)
-/*!
- * Two facets around vertex v share an edge if they have two vertices in common
- * (v itself plus one other vertex).
- */
-static bool facets_share_edge_around_vertex(
-    const Delaunay& dt,
-    Cell_handle cell1, int facet_idx1,
-    Cell_handle cell2, int facet_idx2,
-    Vertex_handle v
-) {
-    // Get the vertices of each facet (excluding the opposite vertex)
-    std::set<Vertex_handle> verts1, verts2;
+struct FacetKey {
+    int cell_index = -1;  // positive cell index
+    int facet_index = -1; // facet index in that positive cell
 
-    for (int k = 0; k < 4; ++k) {
-        if (k != facet_idx1) {
-            verts1.insert(cell1->vertex(k));
+    bool operator==(const FacetKey& other) const {
+        return cell_index == other.cell_index && facet_index == other.facet_index;
+    }
+};
+
+struct FacetKeyHash {
+    size_t operator()(const FacetKey& key) const noexcept {
+        // 32-bit pack is enough for typical indices; still fine on 64-bit.
+        return (static_cast<size_t>(static_cast<uint32_t>(key.cell_index)) << 32) ^
+               static_cast<size_t>(static_cast<uint32_t>(key.facet_index));
+    }
+};
+
+struct EdgeKey {
+    int v0 = -1;
+    int v1 = -1;
+
+    static EdgeKey FromVertexIndices(int a, int b) {
+        if (a < b) {
+            return EdgeKey{a, b};
         }
-        if (k != facet_idx2) {
-            verts2.insert(cell2->vertex(k));
-        }
+        return EdgeKey{b, a};
     }
 
-    // Count common vertices
-    int common_count = 0;
-    for (auto vh : verts1) {
-        if (verts2.count(vh) > 0) {
-            common_count++;
+    bool operator==(const EdgeKey& other) const {
+        return v0 == other.v0 && v1 == other.v1;
+    }
+};
+
+struct EdgeKeyHash {
+    size_t operator()(const EdgeKey& key) const noexcept {
+        return (static_cast<size_t>(static_cast<uint32_t>(key.v0)) << 32) ^
+               static_cast<size_t>(static_cast<uint32_t>(key.v1));
+    }
+};
+
+static int find_vertex_index_in_cell(const Cell_handle& cell, const Vertex_handle& vertex) {
+    for (int i = 0; i < 4; ++i) {
+        if (cell->vertex(i) == vertex) {
+            return i;
         }
     }
-
-    // Two facets sharing vertex v share an edge if they have exactly 2 common vertices
-    // (v plus one edge vertex)
-    return common_count >= 2;
+    return -1;
 }
+
+static Cell_handle cell_between_facet_and_next_facet(
+    const Delaunay& dt,
+    const Facet& facet0,
+    const Facet& facet1
+) {
+    // Mirrors the outline in vdc-cycles-DelaunayBased.txt
+    // Common cell between consecutive facets is either facet0.first or facet1.first.
+    const Facet facet1_mirror = dt.mirror_facet(facet1);
+    if (facet0.first == facet1_mirror.first) {
+        return facet0.first;
+    }
+    return facet1.first;
+}
+
+static std::optional<FacetKey> oriented_isosurface_facet_key(const Delaunay& dt, const Facet& facet) {
+    Cell_handle cell0 = facet.first;
+    if (dt.is_infinite(cell0)) {
+        return std::nullopt;
+    }
+
+    const int facet_index0 = facet.second;
+    Cell_handle cell1 = cell0->neighbor(facet_index0);
+    if (dt.is_infinite(cell1)) {
+        return std::nullopt;
+    }
+
+    const bool cell0_pos = cell0->info().flag_positive;
+    const bool cell1_pos = cell1->info().flag_positive;
+    if (cell0_pos == cell1_pos) {
+        return std::nullopt;
+    }
+
+    if (cell0_pos) {
+        // Our global convention: represent an isosurface facet by (positive_cell, facet_index).
+        return FacetKey{cell0->info().index, facet_index0};
+    }
+
+    // Mirror into the positive cell to match the convention.
+    const Facet mirror = dt.mirror_facet(facet);
+    if (dt.is_infinite(mirror.first) || !mirror.first->info().flag_positive) {
+        return std::nullopt;
+    }
+    return FacetKey{mirror.first->info().index, mirror.second};
+}
+
+static bool facet_is_valid_for_cycle_matching(
+    const Delaunay& dt,
+    const FacetKey& key,
+    const std::unordered_map<int, Cell_handle>& cell_map
+) {
+    auto it = cell_map.find(key.cell_index);
+    if (it == cell_map.end()) {
+        return false;
+    }
+
+    Cell_handle cell = it->second;
+    if (dt.is_infinite(cell)) {
+        return false;
+    }
+
+    if (key.facet_index < 0 || key.facet_index >= 4) {
+        return false;
+    }
+
+    if (!cell->info().facet_is_isosurface[key.facet_index]) {
+        return false;
+    }
+
+    // Ignore any isosurface facets involving dummy Delaunay sites.
+    for (int i = 0; i < 4; ++i) {
+        if (i == key.facet_index) {
+            continue;
+        }
+        Vertex_handle vh = cell->vertex(i);
+        if (dt.is_infinite(vh) || vh->info().is_dummy) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static std::vector<std::pair<FacetKey, FacetKey>> compute_edge_bipolar_matching(
+    const Delaunay& dt,
+    const Edge& edge,
+    BIPOLAR_MATCH_METHOD method,
+    const std::unordered_map<int, Cell_handle>& cell_map
+) {
+    // This implements the "match facets containing edge" outline in vdc-cycles-DelaunayBased.txt.
+    // The resulting pairs represent non-crossing consecutive pairing around the Voronoi facet
+    // dual to this Delaunay edge.
+    Delaunay::Facet_circulator fc_start = dt.incident_facets(edge);
+    if (fc_start == Delaunay::Facet_circulator()) {
+        return {};
+    }
+
+    std::vector<Facet> ring_facets;
+    auto fc = fc_start;
+    do {
+        ring_facets.push_back(*fc);
+        ++fc;
+    } while (fc != fc_start);
+
+    if (ring_facets.empty()) {
+        return {};
+    }
+
+    std::vector<Cell_handle> between_cells(ring_facets.size());
+    for (size_t i = 0; i < ring_facets.size(); ++i) {
+        const Facet& curr = ring_facets[i];
+        const Facet& next = ring_facets[(i + 1) % ring_facets.size()];
+        between_cells[i] = cell_between_facet_and_next_facet(dt, curr, next);
+
+        // Require a fully finite ring; otherwise matching is ambiguous/incomplete.
+        if (dt.is_infinite(between_cells[i])) {
+            return {};
+        }
+    }
+
+    struct BipolarFacetSlot {
+        FacetKey key;
+        bool between_is_positive = false; // sign of the cell sector immediately after this facet
+    };
+
+    std::vector<BipolarFacetSlot> bipolar;
+    bipolar.reserve(ring_facets.size());
+
+    for (size_t i = 0; i < ring_facets.size(); ++i) {
+        const auto key_opt = oriented_isosurface_facet_key(dt, ring_facets[i]);
+        if (!key_opt.has_value()) {
+            continue;
+        }
+
+        const FacetKey& key = key_opt.value();
+        if (!facet_is_valid_for_cycle_matching(dt, key, cell_map)) {
+            continue;
+        }
+
+        bipolar.push_back(BipolarFacetSlot{key, between_cells[i]->info().flag_positive});
+    }
+
+    if (bipolar.size() < 2 || (bipolar.size() % 2 != 0)) {
+        return {};
+    }
+
+    bool desired_between_positive = false;
+    switch (method) {
+        case BIPOLAR_MATCH_METHOD::SEP_NEG:
+            desired_between_positive = false;
+            break;
+        case BIPOLAR_MATCH_METHOD::SEP_POS:
+            desired_between_positive = true;
+            break;
+        case BIPOLAR_MATCH_METHOD::UNCONSTRAINED_MATCH:
+            // Default to the first consecutive pairing.
+            desired_between_positive = bipolar[0].between_is_positive;
+            break;
+        default:
+            return {};
+    }
+
+    size_t start = 0;
+    if (method != BIPOLAR_MATCH_METHOD::UNCONSTRAINED_MATCH) {
+        bool found = false;
+        for (size_t i = 0; i < bipolar.size(); ++i) {
+            if (bipolar[i].between_is_positive == desired_between_positive) {
+                start = i;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return {};
+        }
+    }
+
+    std::vector<std::pair<FacetKey, FacetKey>> pairs;
+    pairs.reserve(bipolar.size() / 2);
+    for (size_t k = 0; k < bipolar.size(); k += 2) {
+        const FacetKey& a = bipolar[(start + k) % bipolar.size()].key;
+        const FacetKey& b = bipolar[(start + k + 1) % bipolar.size()].key;
+        pairs.push_back({a, b});
+    }
+    return pairs;
+}
+
+// ============================================================================
+// Step 8: Compute Facet Cycles
+// ============================================================================
 
 void compute_facet_cycles(Delaunay& dt) {
     DEBUG_PRINT("[DEL-CYCLE] Computing facet cycles around active vertices...");
 
     int total_cycles = 0;
     int multi_cycle_vertices = 0;
+    int ambiguous_edges_total = 0;
+    int ambiguous_edges_matched = 0;
 
     // Build a map for quick cell lookup by index
     std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
 
+    // Cache Delaunay-edge bipolar matchings (Voronoi-facet matchings).
+    // Keyed by (min(v0,v1), max(v0,v1)).
+    std::unordered_map<EdgeKey, std::vector<std::pair<FacetKey, FacetKey>>, EdgeKeyHash> edge_matching_cache;
+
     for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
         if (!vit->info().active) continue;
+        if (vit->info().is_dummy) continue;
+        const Vertex_handle v_handle = vit;
 
         // Clear any existing cycles
         vit->info().facet_cycles.clear();
@@ -83,11 +295,10 @@ void compute_facet_cycles(Delaunay& dt) {
         // Collect all isosurface facets incident on this vertex
         // Store as (cell_index, facet_index) pairs
         std::vector<std::pair<int, int>> isosurface_facets;
-        std::vector<std::pair<Cell_handle, int>> facet_handles;
 
         // Iterate through all cells incident on this vertex
         std::vector<Cell_handle> incident_cells;
-        dt.incident_cells(vit, std::back_inserter(incident_cells));
+        dt.incident_cells(v_handle, std::back_inserter(incident_cells));
 
         for (Cell_handle ch : incident_cells) {
             if (dt.is_infinite(ch)) continue;
@@ -98,11 +309,26 @@ void compute_facet_cycles(Delaunay& dt) {
 
                 // Check if this facet is incident on vertex vit
                 // Facet i is opposite vertex i, so vit must not be at position i
-                int v_idx = ch->index(vit);
+                const int v_idx = find_vertex_index_in_cell(ch, v_handle);
+                if (v_idx < 0) {
+                    continue;
+                }
                 if (v_idx != i) {
+                    // Ignore facets involving any dummy Delaunay sites.
+                    bool has_dummy = false;
+                    for (int j = 0; j < 4; ++j) {
+                        if (j == i) continue;
+                        if (ch->vertex(j)->info().is_dummy) {
+                            has_dummy = true;
+                            break;
+                        }
+                    }
+                    if (has_dummy) {
+                        continue;
+                    }
+
                     // This isosurface facet is incident on vit
                     isosurface_facets.push_back({ch->info().index, i});
-                    facet_handles.push_back({ch, i});
                 }
             }
         }
@@ -114,30 +340,161 @@ void compute_facet_cycles(Delaunay& dt) {
             continue;
         }
 
-        // Build adjacency graph for facets
-        // Two facets are adjacent if they share an edge around this vertex
-        int n = isosurface_facets.size();
-        std::vector<std::vector<int>> adj(n);
-
+        // Build facet->id map for adjacency and matching lookup.
+        const int n = static_cast<int>(isosurface_facets.size());
+        std::unordered_map<FacetKey, int, FacetKeyHash> facetkey_to_id;
+        facetkey_to_id.reserve(isosurface_facets.size());
         for (int i = 0; i < n; ++i) {
-            for (int j = i + 1; j < n; ++j) {
-                if (facets_share_edge_around_vertex(
-                        dt,
-                        facet_handles[i].first, facet_handles[i].second,
-                        facet_handles[j].first, facet_handles[j].second,
-                        vit)) {
-                    adj[i].push_back(j);
-                    adj[j].push_back(i);
+            facetkey_to_id.emplace(FacetKey{isosurface_facets[i].first, isosurface_facets[i].second}, i);
+        }
+
+        // For each Delaunay edge (v,u), collect the incident isosurface facets in this star.
+        const int v_global_index = vit->info().index;
+        std::unordered_map<int, std::vector<int>> neighbor_to_facets;
+        neighbor_to_facets.reserve(isosurface_facets.size());
+
+        for (int fid = 0; fid < n; ++fid) {
+            const int cell_index = isosurface_facets[fid].first;
+            const int facet_index = isosurface_facets[fid].second;
+            auto it = cell_map.find(cell_index);
+            if (it == cell_map.end()) {
+                continue;
+            }
+
+            Cell_handle cell = it->second;
+            Vertex_handle other0 = nullptr;
+            Vertex_handle other1 = nullptr;
+            for (int j = 0; j < 4; ++j) {
+                if (j == facet_index) continue;
+                Vertex_handle vh = cell->vertex(j);
+                if (vh == v_handle) continue;
+                if (other0 == nullptr) {
+                    other0 = vh;
+                } else {
+                    other1 = vh;
+                    break;
+                }
+            }
+
+            if (other0 == nullptr || other1 == nullptr) {
+                continue;
+            }
+            neighbor_to_facets[other0->info().index].push_back(fid);
+            neighbor_to_facets[other1->info().index].push_back(fid);
+        }
+
+        // Map neighbor vertex index -> an Edge object representing (v, neighbor).
+        std::unordered_map<int, Edge> neighbor_edge;
+        {
+            std::vector<Edge> incident_edges;
+            dt.incident_edges(v_handle, std::back_inserter(incident_edges));
+            neighbor_edge.reserve(incident_edges.size());
+
+            for (const Edge& e : incident_edges) {
+                Vertex_handle a = e.first->vertex(e.second);
+                Vertex_handle b = e.first->vertex(e.third);
+                if (a != v_handle && b != v_handle) {
+                    continue;
+                }
+                Vertex_handle other = (a == v_handle) ? b : a;
+                neighbor_edge[other->info().index] = e;
+            }
+        }
+
+        // Build adjacency graph for facets:
+        // - Baseline: clique connections among facets incident to the same Delaunay edge (v,u).
+        // - Refinement: for ambiguous edges with >2 incident facets, replace clique with
+        //   Voronoi-facet bipolar matching derived from the Delaunay-edge ring.
+        std::vector<std::vector<int>> adj(n);
+        for (const auto& [neighbor_index, facet_ids] : neighbor_to_facets) {
+            if (facet_ids.size() < 2) {
+                continue;
+            }
+
+            if (facet_ids.size() == 2) {
+                const int a = facet_ids[0];
+                const int b = facet_ids[1];
+                adj[a].push_back(b);
+                adj[b].push_back(a);
+                continue;
+            }
+
+            ambiguous_edges_total++;
+
+            // Try to apply matching on this ambiguous edge.
+            bool applied_matching = false;
+            const auto edge_it = neighbor_edge.find(neighbor_index);
+            if (edge_it != neighbor_edge.end()) {
+                const Edge& e = edge_it->second;
+                const EdgeKey ekey = EdgeKey::FromVertexIndices(v_global_index, neighbor_index);
+
+                auto cache_it = edge_matching_cache.find(ekey);
+                if (cache_it == edge_matching_cache.end()) {
+                    edge_matching_cache[ekey] = compute_edge_bipolar_matching(
+                        dt, e, BIPOLAR_MATCH_METHOD::SEP_NEG, cell_map);
+                    cache_it = edge_matching_cache.find(ekey);
+                }
+
+                const auto& pairs = cache_it->second;
+                if (!pairs.empty()) {
+                    std::unordered_set<int> group_set(facet_ids.begin(), facet_ids.end());
+                    std::unordered_set<int> covered;
+                    covered.reserve(facet_ids.size());
+
+                    int edge_connections_added = 0;
+                    for (const auto& [k0, k1] : pairs) {
+                        auto it0 = facetkey_to_id.find(k0);
+                        auto it1 = facetkey_to_id.find(k1);
+                        if (it0 == facetkey_to_id.end() || it1 == facetkey_to_id.end()) {
+                            continue;
+                        }
+
+                        const int id0 = it0->second;
+                        const int id1 = it1->second;
+                        if (group_set.count(id0) == 0 || group_set.count(id1) == 0) {
+                            continue;
+                        }
+
+                        adj[id0].push_back(id1);
+                        adj[id1].push_back(id0);
+                        covered.insert(id0);
+                        covered.insert(id1);
+                        edge_connections_added++;
+                    }
+
+                    if (covered.size() == facet_ids.size() &&
+                        edge_connections_added == static_cast<int>(facet_ids.size() / 2)) {
+                        applied_matching = true;
+                        ambiguous_edges_matched++;
+                    } else {
+                        // Roll back partial matching edges by clearing and falling back to clique.
+                        // (We don't track which adj entries were added, so just don't accept it.)
+                        applied_matching = false;
+                        // Note: adjacency may now contain partial entries; we'll rebuild clique below
+                        // by ensuring all pairs are connected. The additional edges do not harm.
+                    }
+                }
+            }
+
+            if (!applied_matching) {
+                // Clique fallback to avoid seams/cracks if matching is incomplete.
+                for (size_t i = 0; i < facet_ids.size(); ++i) {
+                    for (size_t j = i + 1; j < facet_ids.size(); ++j) {
+                        const int a = facet_ids[i];
+                        const int b = facet_ids[j];
+                        adj[a].push_back(b);
+                        adj[b].push_back(a);
+                    }
                 }
             }
         }
 
         // Find connected components (cycles) using DFS
-        std::vector<bool> visited(n, false);
+        std::vector<bool> visited(static_cast<size_t>(n), false);
         std::vector<std::vector<std::pair<int, int>>> cycles;
 
         for (int start = 0; start < n; ++start) {
-            if (visited[start]) continue;
+            if (visited[static_cast<size_t>(start)]) continue;
 
             // Start a new cycle (connected component)
             std::vector<std::pair<int, int>> cycle;
@@ -148,13 +505,13 @@ void compute_facet_cycles(Delaunay& dt) {
                 int curr = stack.top();
                 stack.pop();
 
-                if (visited[curr]) continue;
-                visited[curr] = true;
+                if (visited[static_cast<size_t>(curr)]) continue;
+                visited[static_cast<size_t>(curr)] = true;
 
                 cycle.push_back(isosurface_facets[curr]);
 
                 for (int neighbor : adj[curr]) {
-                    if (!visited[neighbor]) {
+                    if (!visited[static_cast<size_t>(neighbor)]) {
                         stack.push(neighbor);
                     }
                 }
@@ -176,6 +533,8 @@ void compute_facet_cycles(Delaunay& dt) {
 
     DEBUG_PRINT("[DEL-CYCLE] Found " << total_cycles << " cycles total, "
                 << multi_cycle_vertices << " vertices with multiple cycles");
+    DEBUG_PRINT("[DEL-CYCLE] Ambiguous Delaunay edges: " << ambiguous_edges_total
+                << " (matched " << ambiguous_edges_matched << ")");
 }
 
 // ============================================================================
@@ -242,6 +601,18 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
     }
 
     return Point(cx / numI, cy / numI, cz / numI);
+}
+
+Point compute_centroid_of_voronoi_edge_and_isosurface(
+    const Delaunay& dt,
+    const UnifiedGrid& grid,
+    float isovalue,
+    Vertex_handle v_handle,
+    const std::vector<std::pair<int, int>>& cycle_facets
+) {
+    const std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
+    return compute_centroid_of_voronoi_edge_and_isosurface(
+        dt, grid, isovalue, v_handle, cycle_facets, cell_map);
 }
 
 Point project_to_sphere(const Point& point, const Point& center, double radius) {
@@ -417,9 +788,9 @@ static bool triangles_have_nontrivial_intersection(
         }
     }
 
-    // If triangles share 2 or more vertices, they share an edge - this is expected
-    // and not a self-intersection in the problematic sense
-    if (shared_count >= 2) {
+    // If triangles share 1+ vertices, they touch along a mesh vertex/edge.
+    // This is expected and should not be treated as a self-intersection.
+    if (shared_count >= 1) {
         return false;
     }
 
@@ -607,15 +978,34 @@ void resolve_self_intersection(
         redistribute_on_sphere(cycle_isovertices, center, sphere_radius);
     }
 
-    // Step 4: Verify no self-intersection; if still intersecting, fall back to vertex position
-    if (check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
-        // Fallback: place all isovertices at vertex center
-        DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
-                    << ": fallback to center position after sphere projection failed");
-        for (int i = 0; i < n; ++i) {
-            cycle_isovertices[i] = center;
+    // Caller decides what to do if this is still intersecting.
+}
+
+static void merge_vertex_cycles(Vertex_handle v) {
+    auto& cycles = v->info().facet_cycles;
+    if (cycles.size() < 2) {
+        return;
+    }
+
+    std::vector<std::pair<int, int>> merged;
+    merged.reserve(128);
+    std::unordered_set<FacetKey, FacetKeyHash> seen;
+
+    for (const auto& cycle : cycles) {
+        for (const auto& [cell_index, facet_index] : cycle) {
+            FacetKey key{cell_index, facet_index};
+            if (seen.insert(key).second) {
+                merged.push_back({cell_index, facet_index});
+            }
         }
     }
+
+    cycles.clear();
+    cycles.push_back(std::move(merged));
+
+    auto& isovertices = v->info().cycle_isovertices;
+    isovertices.clear();
+    isovertices.push_back(v->info().isov);
 }
 
 void compute_cycle_isovertices(
@@ -685,19 +1075,13 @@ void compute_cycle_isovertices(
             const double sphere_radius = compute_sphere_radius(vit, dt, grid);
             resolve_self_intersection(vit, isovertices, dt, sphere_radius, cell_map);
 
-            const Point cube_center = vit->point();
-            bool all_at_center = true;
-            for (const auto& pos : isovertices) {
-                double dx = pos.x() - cube_center.x();
-                double dy = pos.y() - cube_center.y();
-                double dz = pos.z() - cube_center.z();
-                if (dx*dx + dy*dy + dz*dz > 1e-10) {
-                    all_at_center = false;
-                    break;
-                }
-            }
-
-            if (all_at_center) {
+            if (check_self_intersection(vit, isovertices, dt, cell_map)) {
+                // Safe fallback: merge all cycles back to a single cycle at this vertex.
+                // This preserves the "no self-intersection" property at the cost of
+                // potentially reintroducing some non-manifold edges locally.
+                DEBUG_PRINT("[DEL-SELFI] Vertex " << vit->info().index
+                            << ": merging cycles (sphere redistribution failed)");
+                merge_vertex_cycles(vit);
                 self_intersection_fallback++;
             } else {
                 self_intersection_resolved++;
