@@ -737,7 +737,7 @@ static std::vector<Triangle_3> collect_cycle_triangles(
         // Get isovertex positions for the other two vertices
         // These vertices may also have cycles - we need to find which cycle
         // contains this facet for each vertex
-        Point p1 = cycle_isovertex; // Our cycle's isovertex
+        Point p1 = cycle_isovertex; // This cycle's isovertex
 
         // For the other vertices, find their isovertex for the cycle containing this facet
         Point p2, p3;
@@ -789,7 +789,6 @@ static bool triangles_have_nontrivial_intersection(
     }
 
     // If triangles share 1+ vertices, they touch along a mesh vertex/edge.
-    // This is expected and should not be treated as a self-intersection.
     if (shared_count >= 1) {
         return false;
     }
