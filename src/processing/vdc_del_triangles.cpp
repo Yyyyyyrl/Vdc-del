@@ -20,9 +20,6 @@ void generate_isosurface_triangles(
 
     iso_surface.clear();
 
-    // First, build mapping from (vertex_index, cycle_index) -> isovertex index
-    // and collect all isosurface vertices
-
     int isovertex_idx = 0;
 
     // Build a map from vertex handles to indices for quick lookup
@@ -125,11 +122,7 @@ void generate_isosurface_triangles(
             // CGAL's facet ordering: for facet i, vertices are at (i+1, i+2, i+3) mod 4
             // The outward normal (away from vertex i) follows the right-hand rule.
             //
-            // If the cell is positive and neighbor is negative, we want the normal
-            // to point toward the negative region (outward from positive).
-            // This is consistent with CGAL's convention.
-            //
-            // However, we need to check if i is even or odd for orientation:
+            // Need to check if i is even or odd for orientation:
             // - Even i: vertices in order give outward normal
             // - Odd i: vertices reversed give outward normal
             //
