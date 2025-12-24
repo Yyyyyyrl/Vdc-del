@@ -26,6 +26,7 @@ struct VdcParam {
     bool refine_small_angles = false; //!< Guard: enable facet-centric surface refinement
     bool refine_min_angle_enabled = false; //!< Guard: enable min-angle-driven refinement
     bool refine_max_angle_enabled = false; //!< Guard: enable max-angle-driven refinement
+    bool mod_cyc = true;                   //!< Guard: run modify-cycles pass to fix non-manifolds (default: enabled)
 
     int supersample_r;             //!< Factor by which the input data is supersampled.
     int sep_dist;                  //!< Separation clearance measured in subcubes.
@@ -48,6 +49,7 @@ struct VdcParam {
           refine_small_angles(false),
           refine_min_angle_enabled(false),
           refine_max_angle_enabled(false),
+          mod_cyc(true),
           supersample_r(1),
           sep_dist(1),
           sep_split(0),
@@ -74,6 +76,7 @@ struct VdcParam {
         out << "  Refine min surface angle (deg): " << refine_min_surface_angle_deg << "\n";
         out << "  Refine max surface angle (deg): " << refine_max_surface_angle_deg << "\n";
         out << "  Refine insert resolution: " << refine_insert_resolution << "\n";
+        out << "  Mod cyc: " << (mod_cyc ? "true" : "false") << "\n";
     }
 };
 
