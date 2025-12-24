@@ -20,6 +20,7 @@ void print_help()
     std::cout << "  -position_delv_on_isov      : Position Delaunay vertices on isosurface vertices instead of cube iso-crossings.\n";
     std::cout << "  -timing_stats               : Print timing statistics after the run.\n";
     std::cout << "  -debug                      : Enable debug logging ([DEBUG]/[ISO]/[ISO-MATCH]/[CYC-MOD]).\n";
+    std::cout << "  -no_modcyc                  : Disable modify-cycles pass (enabled by default).\n";
     std::cout << "  -help                       : Print this help message.\n";
 }
 
@@ -92,6 +93,10 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         else if (arg == "-debug")
         {
             debug = true; // Enable global debug logging
+        }
+        else if (arg == "-no_modcyc")
+        {
+            vp.mod_cyc = false; // Disable modify-cycles pass
         }
         else
         {
