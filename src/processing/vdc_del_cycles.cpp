@@ -9,6 +9,7 @@
 #include "core/vdc_debug.h"
 #include <unordered_set>
 #include <unordered_map>
+#include <set>
 #include <optional>
 #include <CGAL/Triangle_3.h>
 #include <CGAL/intersections.h>
@@ -1110,3 +1111,476 @@ int find_cycle_containing_facet(
 
     return -1; // Not found
 }
+
+// ============================================================================
+// Modify Cycles Pass: Fix non-manifolds by flipping problematic matchings
+// ============================================================================
+
+//! @brief Stores matching state per edge for potential flipping
+struct EdgeMatchingState {
+    BIPOLAR_MATCH_METHOD method = BIPOLAR_MATCH_METHOD::SEP_NEG;
+    int unconstrained_offset = 0;
+    bool flipped = false;
+    int flip_count = 0;  // Permanent flip count to prevent oscillation
+};
+
+//! @brief Flip the matching method for an edge
+static void flip_edge_matching(EdgeMatchingState& state) {
+    state.flip_count++;
+    state.flipped = true;
+
+    // After being flipped twice, switch to UNCONSTRAINED mode
+    // This prevents oscillation between SEP_NEG and SEP_POS
+    if (state.flip_count >= 2 && state.method != BIPOLAR_MATCH_METHOD::UNCONSTRAINED_MATCH) {
+        state.method = BIPOLAR_MATCH_METHOD::UNCONSTRAINED_MATCH;
+        state.unconstrained_offset = 0;
+        return;
+    }
+
+    switch (state.method) {
+        case BIPOLAR_MATCH_METHOD::SEP_POS:
+            state.method = BIPOLAR_MATCH_METHOD::SEP_NEG;
+            break;
+        case BIPOLAR_MATCH_METHOD::SEP_NEG:
+            state.method = BIPOLAR_MATCH_METHOD::SEP_POS;
+            break;
+        case BIPOLAR_MATCH_METHOD::UNCONSTRAINED_MATCH:
+            ++state.unconstrained_offset;
+            break;
+        default:
+            state.method = BIPOLAR_MATCH_METHOD::SEP_NEG;
+            break;
+    }
+}
+
+//! @brief Recompute cycles for a single vertex using current edge matching states
+static void recompute_cycles_for_vertex(
+    Delaunay& dt,
+    Vertex_handle v_handle,
+    const std::unordered_map<int, Cell_handle>& cell_map,
+    const std::unordered_map<EdgeKey, EdgeMatchingState, EdgeKeyHash>& edge_matching_states
+) {
+    if (!v_handle->info().active || v_handle->info().is_dummy) {
+        return;
+    }
+
+    // Clear existing cycles
+    v_handle->info().facet_cycles.clear();
+
+    // Collect all isosurface facets incident on this vertex (same as compute_facet_cycles)
+    std::vector<std::pair<int, int>> isosurface_facets;
+    std::vector<Cell_handle> incident_cells;
+    dt.incident_cells(v_handle, std::back_inserter(incident_cells));
+
+    for (Cell_handle ch : incident_cells) {
+        if (dt.is_infinite(ch)) continue;
+
+        for (int i = 0; i < 4; ++i) {
+            if (!ch->info().facet_is_isosurface[i]) continue;
+
+            const int v_idx = find_vertex_index_in_cell(ch, v_handle);
+            if (v_idx < 0 || v_idx == i) continue;
+
+            // Ignore facets involving dummy sites
+            bool has_dummy = false;
+            for (int j = 0; j < 4; ++j) {
+                if (j == i) continue;
+                if (ch->vertex(j)->info().is_dummy) {
+                    has_dummy = true;
+                    break;
+                }
+            }
+            if (has_dummy) continue;
+
+            isosurface_facets.push_back({ch->info().index, i});
+        }
+    }
+
+    if (isosurface_facets.empty()) {
+        return;
+    }
+
+    // Build facet -> id map
+    const int n = static_cast<int>(isosurface_facets.size());
+    std::unordered_map<FacetKey, int, FacetKeyHash> facetkey_to_id;
+    facetkey_to_id.reserve(isosurface_facets.size());
+    for (int i = 0; i < n; ++i) {
+        facetkey_to_id.emplace(FacetKey{isosurface_facets[i].first, isosurface_facets[i].second}, i);
+    }
+
+    // Collect neighbor -> facets mapping
+    const int v_global_index = v_handle->info().index;
+    std::unordered_map<int, std::vector<int>> neighbor_to_facets;
+
+    for (int fid = 0; fid < n; ++fid) {
+        const int cell_index = isosurface_facets[fid].first;
+        const int facet_index = isosurface_facets[fid].second;
+        auto it = cell_map.find(cell_index);
+        if (it == cell_map.end()) continue;
+
+        Cell_handle cell = it->second;
+        Vertex_handle other0 = nullptr, other1 = nullptr;
+        for (int j = 0; j < 4; ++j) {
+            if (j == facet_index) continue;
+            Vertex_handle vh = cell->vertex(j);
+            if (vh == v_handle) continue;
+            if (other0 == nullptr) other0 = vh;
+            else { other1 = vh; break; }
+        }
+
+        if (other0 != Vertex_handle() && other1 != Vertex_handle()) {
+            neighbor_to_facets[other0->info().index].push_back(fid);
+            neighbor_to_facets[other1->info().index].push_back(fid);
+        }
+    }
+
+    // Build adjacency using stored edge matching states
+    std::vector<std::vector<int>> adj(n);
+    std::vector<Edge> incident_edges;
+    dt.incident_edges(v_handle, std::back_inserter(incident_edges));
+    std::unordered_map<int, Edge> neighbor_edge;
+    for (const Edge& e : incident_edges) {
+        Vertex_handle a = e.first->vertex(e.second);
+        Vertex_handle b = e.first->vertex(e.third);
+        if (a != v_handle && b != v_handle) continue;
+        Vertex_handle other = (a == v_handle) ? b : a;
+        neighbor_edge[other->info().index] = e;
+    }
+
+    for (const auto& [neighbor_index, facet_ids] : neighbor_to_facets) {
+        if (facet_ids.size() < 2) continue;
+
+        if (facet_ids.size() == 2) {
+            adj[facet_ids[0]].push_back(facet_ids[1]);
+            adj[facet_ids[1]].push_back(facet_ids[0]);
+            continue;
+        }
+
+        // Ambiguous edge: use stored matching state
+        EdgeKey ekey = EdgeKey::FromVertexIndices(v_global_index, neighbor_index);
+        auto state_it = edge_matching_states.find(ekey);
+        bool applied_matching = false;
+
+        if (state_it != edge_matching_states.end()) {
+            auto edge_it = neighbor_edge.find(neighbor_index);
+            if (edge_it != neighbor_edge.end()) {
+                auto pairs = compute_edge_bipolar_matching(dt, edge_it->second, state_it->second.method, cell_map);
+                if (!pairs.empty()) {
+                    std::unordered_set<int> group_set(facet_ids.begin(), facet_ids.end());
+                    std::unordered_set<int> covered;
+                    int connections = 0;
+
+                    for (const auto& [k0, k1] : pairs) {
+                        auto it0 = facetkey_to_id.find(k0);
+                        auto it1 = facetkey_to_id.find(k1);
+                        if (it0 == facetkey_to_id.end() || it1 == facetkey_to_id.end()) continue;
+
+                        int id0 = it0->second, id1 = it1->second;
+                        if (group_set.count(id0) && group_set.count(id1)) {
+                            adj[id0].push_back(id1);
+                            adj[id1].push_back(id0);
+                            covered.insert(id0);
+                            covered.insert(id1);
+                            connections++;
+                        }
+                    }
+
+                    if (covered.size() == facet_ids.size() && connections == static_cast<int>(facet_ids.size() / 2)) {
+                        applied_matching = true;
+                    }
+                }
+            }
+        }
+
+        if (!applied_matching) {
+            // Clique fallback
+            for (size_t i = 0; i < facet_ids.size(); ++i) {
+                for (size_t j = i + 1; j < facet_ids.size(); ++j) {
+                    adj[facet_ids[i]].push_back(facet_ids[j]);
+                    adj[facet_ids[j]].push_back(facet_ids[i]);
+                }
+            }
+        }
+    }
+
+    // Extract connected components as cycles
+    std::vector<bool> visited(n, false);
+    std::vector<std::vector<std::pair<int, int>>> cycles;
+
+    for (int start = 0; start < n; ++start) {
+        if (visited[start]) continue;
+
+        std::vector<std::pair<int, int>> cycle;
+        std::stack<int> stack;
+        stack.push(start);
+
+        while (!stack.empty()) {
+            int curr = stack.top();
+            stack.pop();
+            if (visited[curr]) continue;
+            visited[curr] = true;
+            cycle.push_back(isosurface_facets[curr]);
+            for (int neighbor : adj[curr]) {
+                if (!visited[neighbor]) stack.push(neighbor);
+            }
+        }
+        cycles.push_back(cycle);
+    }
+
+    v_handle->info().facet_cycles = cycles;
+}
+
+ModifyCyclesResult modify_cycles_pass(Delaunay& dt) {
+    ModifyCyclesResult result;
+    const int MAX_ITERATIONS = 10;
+
+    std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
+
+    // Build initial edge matching states (all start with SEP_NEG as in compute_facet_cycles)
+    std::unordered_map<EdgeKey, EdgeMatchingState, EdgeKeyHash> edge_matching_states;
+
+    // Collect all ambiguous edges (edges with >2 incident isosurface facets)
+    for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
+        if (!vit->info().active || vit->info().is_dummy) continue;
+
+        std::vector<Edge> incident_edges;
+        dt.incident_edges(vit, std::back_inserter(incident_edges));
+
+        for (const Edge& e : incident_edges) {
+            Vertex_handle a = e.first->vertex(e.second);
+            Vertex_handle b = e.first->vertex(e.third);
+            if (&*a != &*vit && &*b != &*vit) continue;
+            Vertex_handle other = (&*a == &*vit) ? b : a;
+
+            EdgeKey ekey = EdgeKey::FromVertexIndices(vit->info().index, other->info().index);
+            if (edge_matching_states.find(ekey) == edge_matching_states.end()) {
+                edge_matching_states[ekey] = EdgeMatchingState{};
+            }
+        }
+    }
+
+    // Build vertex index -> handle map for recomputation
+    std::unordered_map<int, Vertex_handle> vertex_index_to_handle;
+    for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
+        if (!vit->info().active || vit->info().is_dummy) continue;
+        vertex_index_to_handle[vit->info().index] = vit;
+    }
+
+    // Iterate until no conflicts or max iterations
+    for (int iter = 0; iter < MAX_ITERATIONS; ++iter) {
+        result.iterations = iter + 1;
+        bool found_conflict = false;
+        std::set<int> dirty_vertex_indices;
+        int conflicts_this_iteration = 0;
+
+        // Check each vertex for problematic iso-segment assignments
+        // Note: We need to check ALL vertices (not just multi-cycle ones) because
+        // non-manifolds can occur when multiple facets on the same edge map to
+        // the same (vertex0.cycle0, vertex1.cycle0) pair even with single-cycle endpoints
+        for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
+            if (!vit->info().active || vit->info().is_dummy) continue;
+
+            // Process all edges, not just those around multi-cycle vertices
+            std::vector<Edge> incident_edges;
+            dt.incident_edges(vit, std::back_inserter(incident_edges));
+
+            for (const Edge& e : incident_edges) {
+                Vertex_handle a = e.first->vertex(e.second);
+                Vertex_handle b = e.first->vertex(e.third);
+                if (&*a != &*vit && &*b != &*vit) continue;
+                Vertex_handle other = (&*a == &*vit) ? b : a;
+
+                EdgeKey ekey = EdgeKey::FromVertexIndices(vit->info().index, other->info().index);
+                auto state_it = edge_matching_states.find(ekey);
+                if (state_it == edge_matching_states.end()) continue;
+                if (state_it->second.flipped) continue; // Already flipped this iteration
+
+                auto pairs = compute_edge_bipolar_matching(dt, e, state_it->second.method, cell_map);
+                if (pairs.size() < 2) continue;
+
+                // Check for duplicate cycle pairs
+                std::set<std::pair<int, int>> seen_cycle_pairs;
+                bool has_duplicate = false;
+
+                for (const auto& [k0, k1] : pairs) {
+                    // k0 and k1 are matched facets around this edge
+                    // Find which cycle each facet belongs to on its respective endpoint vertex
+                    // c_vit = cycle on vit, c_other = cycle on other
+                    int c_vit = find_cycle_containing_facet(vit, k0.cell_index, k0.facet_index);
+                    if (c_vit < 0) {
+                        c_vit = find_cycle_containing_facet(vit, k1.cell_index, k1.facet_index);
+                    }
+                    
+                    int c_other = -1;
+                    if (!other->info().is_dummy && other->info().active) {
+                        c_other = find_cycle_containing_facet(other, k0.cell_index, k0.facet_index);
+                        if (c_other < 0) {
+                            c_other = find_cycle_containing_facet(other, k1.cell_index, k1.facet_index);
+                        }
+                    }
+
+                    if (c_vit >= 0 && c_other >= 0) {
+                        // The cycle pair is (vit.cycle, other.cycle)
+                        auto cycle_pair = std::make_pair(c_vit, c_other);
+                        if (seen_cycle_pairs.count(cycle_pair)) {
+                            has_duplicate = true;
+                            break;
+                        }
+                        seen_cycle_pairs.insert(cycle_pair);
+                    }
+                }
+
+                if (has_duplicate) {
+                    flip_edge_matching(state_it->second);
+                    found_conflict = true;
+                    conflicts_this_iteration++;
+                    result.total_flips++;
+                    dirty_vertex_indices.insert(vit->info().index);
+                    if (!other->info().is_dummy && other->info().active) {
+                        dirty_vertex_indices.insert(other->info().index);
+                    }
+                }
+            }
+        }
+
+        result.problematic_edges = conflicts_this_iteration;
+
+        if (!found_conflict) {
+            break;
+        }
+
+        // Recompute cycles for affected vertices
+        for (int v_idx : dirty_vertex_indices) {
+            auto it = vertex_index_to_handle.find(v_idx);
+            if (it != vertex_index_to_handle.end()) {
+                recompute_cycles_for_vertex(dt, it->second, cell_map, edge_matching_states);
+            }
+        }
+
+        // Reset flipped flags for next iteration
+        for (auto& [k, state] : edge_matching_states) {
+            state.flipped = false;
+        }
+    }
+
+    // ========================================================================
+    // Phase 2: Cross-edge conflict detection
+    // Detect when two different edges map to the same global (vertex-cycle, vertex-cycle) pair
+    // ========================================================================
+    
+    // Helper to make a unique component key from (vertex_index, cycle_index)
+    auto make_component_key = [](int vertex_idx, int cycle_idx) -> int64_t {
+        return (static_cast<int64_t>(vertex_idx) << 32) | static_cast<uint32_t>(cycle_idx);
+    };
+
+    const int MAX_CROSS_ITERATIONS = 10;
+    for (int cross_iter = 0; cross_iter < MAX_CROSS_ITERATIONS; ++cross_iter) {
+        bool found_cross_conflict = false;
+        
+        // Map from (compKeyA, compKeyB) -> EdgeKey that produces this pairing
+        std::map<std::pair<int64_t, int64_t>, EdgeKey> globalCompPairToEdge;
+        std::set<int> dirty_vertex_indices_cross;
+
+        // Scan all edges and their current matchings
+        for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
+            if (!vit->info().active || vit->info().is_dummy) continue;
+
+            const auto& cycles = vit->info().facet_cycles;
+            if (cycles.size() <= 1) continue;
+
+            std::vector<Edge> incident_edges;
+            dt.incident_edges(vit, std::back_inserter(incident_edges));
+
+            for (const Edge& e : incident_edges) {
+                Vertex_handle a = e.first->vertex(e.second);
+                Vertex_handle b = e.first->vertex(e.third);
+                if (&*a != &*vit && &*b != &*vit) continue;
+                Vertex_handle other = (&*a == &*vit) ? b : a;
+
+                if (other->info().is_dummy) continue;
+
+                EdgeKey ekey = EdgeKey::FromVertexIndices(vit->info().index, other->info().index);
+                auto state_it = edge_matching_states.find(ekey);
+                if (state_it == edge_matching_states.end()) continue;
+                if (state_it->second.flipped) continue;
+
+                auto pairs = compute_edge_bipolar_matching(dt, e, state_it->second.method, cell_map);
+                
+                for (const auto& [k0, k1] : pairs) {
+                    // Get cycle indices from both endpoints
+                    int c_vit = find_cycle_containing_facet(vit, k0.cell_index, k0.facet_index);
+                    int c_other = -1;
+                    if (!other->info().is_dummy && other->info().active) {
+                        c_other = find_cycle_containing_facet(other, k1.cell_index, k1.facet_index);
+                    }
+                    
+                    if (c_vit < 0 || c_other < 0) continue;
+
+                    int64_t keyA = make_component_key(vit->info().index, c_vit);
+                    int64_t keyB = make_component_key(other->info().index, c_other);
+                    if (keyA > keyB) std::swap(keyA, keyB);
+                    auto globalKey = std::make_pair(keyA, keyB);
+
+                    auto git = globalCompPairToEdge.find(globalKey);
+                    if (git == globalCompPairToEdge.end()) {
+                        globalCompPairToEdge.emplace(globalKey, ekey);
+                        continue;
+                    }
+
+                    EdgeKey otherEdge = git->second;
+                    if (otherEdge == ekey) continue;
+
+                    // Conflict: two different edges map to same component pair
+                    // Flip the current edge if not already flipped
+                    auto other_state_it = edge_matching_states.find(otherEdge);
+                    EdgeKey target_edge = ekey;
+                    
+                    if (state_it->second.flipped && other_state_it != edge_matching_states.end() 
+                        && !other_state_it->second.flipped) {
+                        target_edge = otherEdge;
+                    }
+
+                    auto& target_state = edge_matching_states[target_edge];
+                    flip_edge_matching(target_state);
+                    result.total_flips++;
+                    found_cross_conflict = true;
+
+                    // Mark affected vertices dirty
+                    dirty_vertex_indices_cross.insert(target_edge.v0);
+                    dirty_vertex_indices_cross.insert(target_edge.v1);
+                    break;
+                }
+                if (found_cross_conflict) break;
+            }
+            if (found_cross_conflict) break;
+        }
+
+        if (!found_cross_conflict) break;
+
+        // Recompute cycles for affected vertices
+        for (int v_idx : dirty_vertex_indices_cross) {
+            auto it = vertex_index_to_handle.find(v_idx);
+            if (it != vertex_index_to_handle.end()) {
+                recompute_cycles_for_vertex(dt, it->second, cell_map, edge_matching_states);
+            }
+        }
+
+        // Reset flipped flags
+        for (auto& [k, state] : edge_matching_states) {
+            state.flipped = false;
+        }
+
+        result.iterations++;
+    }
+
+    if (result.total_flips > 0) {
+        std::cout << "  ModCyc: " << result.total_flips << " edge flips ("
+                  << result.iterations << " iterations)" << std::endl;
+    }
+
+    DEBUG_PRINT("[CYC-MOD] mod_cyc: flips=" << result.total_flips
+                << ", iterations=" << result.iterations);
+
+    return result;
+}
+
