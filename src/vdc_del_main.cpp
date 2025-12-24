@@ -203,6 +203,11 @@ int main(int argc, char* argv[]) {
 
     compute_facet_cycles(dt);
 
+    // Optional mod_cyc pass to fix non-manifolds from problematic matchings
+    if (param.mod_cyc) {
+        modify_cycles_pass(dt);
+    }
+
     TimingStats::getInstance().stopTimer("CycleDetection", "Total");
 
     // ========================================================================
