@@ -94,6 +94,27 @@ void mark_active_vertices(Delaunay& dt);
  */
 void compute_facet_cycles(Delaunay& dt);
 
+//! @brief Result structure for modify_cycles_pass function.
+struct ModifyCyclesResult {
+    int total_flips = 0;      //!< Total number of edge matching flips
+    int problematic_edges = 0; //!< Number of problematic edges found
+    int iterations = 0;        //!< Number of fix iterations performed
+};
+
+//! @brief Modify cycles to fix non-manifold configurations from problematic matchings.
+/*!
+ * This function implements the mod_cyc algorithm adapted from Voronoi-based VDC:
+ * - Detects edges where multiple facets share the same cycle component pair
+ * - Flips the bipolar matching method (SEP_NEG <-> SEP_POS) to resolve conflicts
+ * - Recomputes cycles for affected vertices
+ *
+ * The function iterates until no conflicts remain or a maximum iteration count is reached.
+ *
+ * @param dt The Delaunay triangulation (must have cycles computed first)
+ * @return ModifyCyclesResult containing statistics about the modifications
+ */
+ModifyCyclesResult modify_cycles_pass(Delaunay& dt);
+
 //! @brief Compute the centroid of Voronoi edge / isosurface intersections for a cycle.
 /*!
  * For each facet in the cycle:
