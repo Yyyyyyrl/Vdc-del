@@ -225,10 +225,13 @@ static std::vector<std::pair<FacetKey, FacetKey>> compute_edge_bipolar_matching(
     bool desired_between_positive = false;
     switch (method) {
         case BIPOLAR_MATCH_METHOD::SEP_NEG:
-            desired_between_positive = false;
+            // Separate negative regions: between-cell should be POSITIVE
+            // (Algorithm: cell0.flag_positive != flag_separate_negative → skip if not matching)
+            desired_between_positive = true;
             break;
         case BIPOLAR_MATCH_METHOD::SEP_POS:
-            desired_between_positive = true;
+            // Separate positive regions: between-cell should be NEGATIVE
+            desired_between_positive = false;
             break;
         case BIPOLAR_MATCH_METHOD::UNCONSTRAINED_MATCH:
             // Default to the first consecutive pairing.
