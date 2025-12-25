@@ -157,6 +157,11 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
                                   + "-S" + std::to_string(vp.sep_split);
         }
 
+        if (!vp.mod_cyc)
+        {
+            vp.output_filename += "_no-mod-cyc";
+        }
+
         // Add file format extension.
         vp.output_filename += "." + vp.output_format;
     }
