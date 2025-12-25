@@ -970,33 +970,6 @@ void resolve_self_intersection(
     // Caller decides what to do if this is still intersecting.
 }
 
-static void merge_vertex_cycles(Vertex_handle v) {
-    auto& cycles = v->info().facet_cycles;
-    if (cycles.size() < 2) {
-        return;
-    }
-
-    std::vector<std::pair<int, int>> merged;
-    merged.reserve(128);
-    std::unordered_set<FacetKey, FacetKeyHash> seen;
-
-    for (const auto& cycle : cycles) {
-        for (const auto& [cell_index, facet_index] : cycle) {
-            FacetKey key{cell_index, facet_index};
-            if (seen.insert(key).second) {
-                merged.push_back({cell_index, facet_index});
-            }
-        }
-    }
-
-    cycles.clear();
-    cycles.push_back(std::move(merged));
-
-    auto& isovertices = v->info().cycle_isovertices;
-    isovertices.clear();
-    isovertices.push_back(v->info().isov);
-}
-
 void compute_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
@@ -1064,17 +1037,6 @@ void compute_cycle_isovertices(
             const double sphere_radius = compute_sphere_radius(vit, dt, grid);
             resolve_self_intersection(vit, isovertices, dt, sphere_radius, cell_map);
 
-            if (check_self_intersection(vit, isovertices, dt, cell_map)) {
-                // Safe fallback: merge all cycles back to a single cycle at this vertex.
-                // This preserves the "no self-intersection" property at the cost of
-                // potentially reintroducing some non-manifold edges locally.
-                DEBUG_PRINT("[DEL-SELFI] Vertex " << vit->info().index
-                            << ": merging cycles (sphere redistribution failed)");
-                merge_vertex_cycles(vit);
-                self_intersection_fallback++;
-            } else {
-                self_intersection_resolved++;
-            }
         }
     }
 
