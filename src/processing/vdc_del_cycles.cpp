@@ -309,10 +309,7 @@ static int get_vertex_index_in_facet(
 }
 
 void compute_facet_cycles(Delaunay& dt) {
-    DEBUG_PRINT("[DEL-CYCLE] Computing facet cycles around active vertices (algorithm-aligned)...");
 
-    int total_cycles = 0;
-    int multi_cycle_vertices = 0;
 
     // Build a map for quick cell lookup by index
     std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
@@ -433,10 +430,6 @@ void compute_facet_cycles(Delaunay& dt) {
             }
         }
 
-        if (isosurface_facets.empty()) {
-            DEBUG_PRINT("[DEL-CYCLE] Warning: Active vertex " << v_idx << " has no isosurface facets");
-            continue;
-        }
 
         // Map facet key to vertex index within that facet (for this vertex v)
         std::unordered_map<FacetKey, int, FacetKeyHash> facet_to_v_index;
@@ -498,14 +491,9 @@ void compute_facet_cycles(Delaunay& dt) {
         vit->info().facet_cycles = cycles;
         total_cycles += cycles.size();
 
-        if (cycles.size() > 1) {
-            multi_cycle_vertices++;
-            DEBUG_PRINT("[DEL-CYCLE] Vertex " << v_idx << " has " << cycles.size() << " cycles");
-        }
+
     }
 
-    DEBUG_PRINT("[DEL-CYCLE] Found " << total_cycles << " cycles total, "
-                << multi_cycle_vertices << " vertices with multiple cycles");
 }
 
 // ============================================================================
