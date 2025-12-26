@@ -955,7 +955,7 @@ enum class ResolutionStatus {
 /*!
  * Tries multiple strategies to eliminate self-intersections between cycles:
  * 1. Increase sphere radius (tries 1x, 2x, 3x of base radius)
- * 2. Fall back to uniform spherical distribution with different rotations
+ * 2. uniform spherical distribution with different rotations
  *
  * @param v The vertex with potential self-intersection
  * @param cycle_isovertices The isovertex positions to modify
@@ -1038,6 +1038,13 @@ ResolutionStatus resolve_self_intersection(
                     << cycle_isovertices[i].x() << ", "
                     << cycle_isovertices[i].y() << ", "
                     << cycle_isovertices[i].z() << ")");
+        // Also output the facets in this cycle
+        DEBUG_PRINT("[DEBUG-UNRESOLVED]     Cycle " << i << " contains " 
+                    << cycles[i].size() << " facets:");
+        for (const auto& fkey : cycles[i]) {
+            DEBUG_PRINT("[DEBUG-UNRESOLVED]       Facet (cell=" << fkey.first 
+                        << ", local_idx=" << fkey.second << ")");
+        }
     }
 
     return ResolutionStatus::UNRESOLVED;
