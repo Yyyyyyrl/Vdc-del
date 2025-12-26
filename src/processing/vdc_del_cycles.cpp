@@ -944,33 +944,104 @@ static void redistribute_on_sphere(
     }
 }
 
-void resolve_self_intersection(
+//! @brief Resolution status enum
+enum class ResolutionStatus {
+    NOT_NEEDED,      // No self-intersection detected
+    RESOLVED_SPHERE, // Resolved by sphere radius increase
+    RESOLVED_FALLBACK, // Resolved by fallback distribution
+    UNRESOLVED       // Could not resolve
+};
+
+//! @brief Attempt to resolve self-intersection for a multi-cycle vertex
+/*!
+ * Tries multiple strategies to eliminate self-intersections between cycles:
+ * 1. Increase sphere radius (tries 1x, 2x, 3x of base radius)
+ * 2. Fall back to uniform spherical distribution with different rotations
+ *
+ * @param v The vertex with potential self-intersection
+ * @param cycle_isovertices The isovertex positions to modify
+ * @param dt The Delaunay triangulation
+ * @param grid The volumetric grid
+ * @param isovalue The isovalue for centroid computation
+ * @param cell_map Map from cell indices to cell handles
+ * @return Resolution status indicating what happened
+ */
+ResolutionStatus resolve_self_intersection(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    double sphere_radius,
+    const UnifiedGrid& grid,
+    float isovalue,
     const std::unordered_map<int, Cell_handle>& cell_map
 ) {
+    // Check if resolution is needed
+    if (!check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
+        return ResolutionStatus::NOT_NEEDED;
+    }
+
+    const auto& cycles = v->info().facet_cycles;
     Point center = v->point();
     int n = static_cast<int>(cycle_isovertices.size());
 
-    if (n < 2) return;
+    if (n < 2) return ResolutionStatus::NOT_NEEDED;
 
-    // Step 1: Project all centroids onto sphere
+    // Save original positions to restore if all attempts fail
+    std::vector<Point> original_positions = cycle_isovertices;
+
+    const double base_radius = compute_sphere_radius(v, dt, grid);
+
+    // Strategy 1: Try increasing sphere radius (1x, 2x, 3x)
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        const double sphere_radius = base_radius * attempt;
+        
+        // Recompute centroids and project to larger sphere
+        for (size_t c = 0; c < cycles.size(); ++c) {
+            Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
+                dt, grid, isovalue, v, cycles[c], cell_map);
+            cycle_isovertices[c] = project_to_sphere(centroid, center, sphere_radius);
+        }
+
+        // Check if this resolves the intersection
+        if (!check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
+            return ResolutionStatus::RESOLVED_SPHERE;
+        }
+    }
+
+    // Strategy 2: Try uniform distribution with a few rotations
+    const double sphere_radius = base_radius * 3.0;
+    
+    for (int rot = 0; rot < 3; ++rot) {
+        double rotation = 2.0 * M_PI * rot / 3.0;  // 0, 120, 240 degrees
+        
+        for (int i = 0; i < n; ++i) {
+            double theta = 2.0 * M_PI * i / n + rotation;
+            double phi = (n > 2) ? std::acos(1.0 - 2.0 * (i + 0.5) / n) : M_PI / 2.0;
+            double x = center.x() + sphere_radius * std::sin(phi) * std::cos(theta);
+            double y = center.y() + sphere_radius * std::sin(phi) * std::sin(theta);
+            double z = center.z() + sphere_radius * std::cos(phi);
+            cycle_isovertices[i] = Point(x, y, z);
+        }
+
+        if (!check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
+            return ResolutionStatus::RESOLVED_FALLBACK;
+        }
+    }
+
+    // If nothing worked, restore original positions (from sphere projection attempt 1)
+    cycle_isovertices = original_positions;
+
+    // Debug output for unresolved cases
+    DEBUG_PRINT("[DEBUG-UNRESOLVED] Vertex " << v->info().index 
+                << " at (" << center.x() << ", " << center.y() << ", " << center.z() << ")"
+                << " has " << n << " cycles, could not resolve self-intersection");
     for (int i = 0; i < n; ++i) {
-        cycle_isovertices[i] = project_to_sphere(cycle_isovertices[i], center, sphere_radius);
+        DEBUG_PRINT("[DEBUG-UNRESOLVED]   Isovertex " << i << ": ("
+                    << cycle_isovertices[i].x() << ", "
+                    << cycle_isovertices[i].y() << ", "
+                    << cycle_isovertices[i].z() << ")");
     }
 
-    // Step 2: Check minimum angular separation
-    double min_angle = compute_min_angular_separation(cycle_isovertices, center);
-    double required_angle = 2.0 * M_PI / (3.0 * n); // Heuristic threshold
-
-    // Step 3: If too close, redistribute on sphere
-    if (min_angle < required_angle) {
-        redistribute_on_sphere(cycle_isovertices, center, sphere_radius);
-    }
-
-    // Caller decides what to do if this is still intersecting.
+    return ResolutionStatus::UNRESOLVED;
 }
 
 void compute_cycle_isovertices(
@@ -1034,12 +1105,26 @@ void compute_cycle_isovertices(
 
         if (cycles.size() < 2) continue;
 
-        if (check_self_intersection(vit, isovertices, dt, cell_map)) {
-            self_intersection_detected++;
+        // Call the resolution function which handles all strategies
+        ResolutionStatus status = resolve_self_intersection(
+            vit, isovertices, dt, grid, isovalue, cell_map);
 
-            const double sphere_radius = compute_sphere_radius(vit, dt, grid);
-            resolve_self_intersection(vit, isovertices, dt, sphere_radius, cell_map);
-
+        switch (status) {
+            case ResolutionStatus::NOT_NEEDED:
+                // No self-intersection was present
+                break;
+            case ResolutionStatus::RESOLVED_SPHERE:
+                self_intersection_detected++;
+                self_intersection_resolved++;
+                break;
+            case ResolutionStatus::RESOLVED_FALLBACK:
+                self_intersection_detected++;
+                self_intersection_fallback++;
+                break;
+            case ResolutionStatus::UNRESOLVED:
+                self_intersection_detected++;
+                // Intersection remains - will be counted as unresolved
+                break;
         }
     }
 
