@@ -489,7 +489,6 @@ void compute_facet_cycles(Delaunay& dt) {
 
         // Store cycles in vertex info
         vit->info().facet_cycles = cycles;
-        total_cycles += cycles.size();
 
 
     }
