@@ -222,18 +222,7 @@ static std::vector<std::pair<FacetKey, FacetKey>> compute_edge_bipolar_matching(
         return {};
     }
 
-    // Debug: show bipolar ring for specific edges around vertex 85894
-    int edge_vi0 = edge.first->vertex(edge.second)->info().index;
-    int edge_vi1 = edge.first->vertex(edge.third)->info().index;
-    if (debug && (edge_vi0 == 85894 || edge_vi1 == 85894)) {
-        int neighbor = (edge_vi0 == 85894) ? edge_vi1 : edge_vi0;
-        std::cerr << "[DEBUG-RING] Edge 85894-" << neighbor << " bipolar ring:" << std::endl;
-        for (size_t i = 0; i < bipolar.size(); ++i) {
-            std::cerr << "[DEBUG-RING]   " << i << ": cell=" << bipolar[i].key.cell_index
-                      << ", facet=" << bipolar[i].key.facet_index
-                      << ", between_positive=" << bipolar[i].between_is_positive << std::endl;
-        }
-    }
+
 
     bool desired_between_positive = false;
     switch (method) {
