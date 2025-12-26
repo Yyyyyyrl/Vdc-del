@@ -933,8 +933,7 @@ static void redistribute_on_sphere(
     int n = static_cast<int>(points.size());
     if (n < 2) return;
 
-    // For simplicity, distribute points evenly around a great circle
-    // More sophisticated methods could use spherical Fibonacci or other distributions
+    // distribute points evenly around a great circle
     for (int i = 0; i < n; ++i) {
         double theta = 2.0 * M_PI * i / n;
         double x = center.x() + radius * std::cos(theta);
@@ -990,7 +989,7 @@ ResolutionStatus resolve_self_intersection(
 
     const double base_radius = compute_sphere_radius(v, dt, grid);
 
-    // Strategy 1: Try increasing sphere radius (1x, 2x, 3x)
+    // 1 Try increasing sphere radius (1x, 2x, 3x)
     for (int attempt = 1; attempt <= 3; ++attempt) {
         const double sphere_radius = base_radius * attempt;
         
@@ -1007,7 +1006,7 @@ ResolutionStatus resolve_self_intersection(
         }
     }
 
-    // Strategy 2: Try uniform distribution with a few rotations
+    // 2 Try uniform distribution with a few rotations
     const double sphere_radius = base_radius * 3.0;
     
     for (int rot = 0; rot < 3; ++rot) {
@@ -1027,7 +1026,7 @@ ResolutionStatus resolve_self_intersection(
         }
     }
 
-    // If nothing worked, restore original positions (from sphere projection attempt 1)
+    // restore original positions (from sphere projection attempt 1)
     cycle_isovertices = original_positions;
 
     // Debug output for unresolved cases
@@ -1058,7 +1057,7 @@ void compute_cycle_isovertices(
     int self_intersection_resolved = 0;
     int self_intersection_fallback = 0;
 
-    // Build cell lookup map ONCE for the entire function (performance fix)
+    // Build cell lookup map ONCE for the entire function usage
     std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
 
     // Pass 1: compute initial isovertices for all active vertices.
@@ -1109,6 +1108,7 @@ void compute_cycle_isovertices(
         ResolutionStatus status = resolve_self_intersection(
             vit, isovertices, dt, grid, isovalue, cell_map);
 
+        // For testing and debug purpose
         switch (status) {
             case ResolutionStatus::NOT_NEEDED:
                 // No self-intersection was present
@@ -1134,9 +1134,7 @@ void compute_cycle_isovertices(
 
     if (self_intersection_detected > 0) {
         DEBUG_PRINT("[DEL-SELFI] Self-intersection stats: "
-                    << self_intersection_detected << " detected, "
-                    << self_intersection_resolved << " resolved by sphere projection, "
-                    << self_intersection_fallback << " using fallback (center position)");
+                    << self_intersection_detected << " detected.");
     }
 }
 
@@ -1423,10 +1421,7 @@ ModifyCyclesResult modify_cycles_pass(Delaunay& dt) {
         std::set<int> dirty_vertex_indices;
         int conflicts_this_iteration = 0;
 
-        // Check each vertex for problematic iso-segment assignments
-        // Note: We need to check ALL vertices (not just multi-cycle ones) because
-        // non-manifolds can occur when multiple facets on the same edge map to
-        // the same (vertex0.cycle0, vertex1.cycle0) pair even with single-cycle endpoints
+        // Check each vertex for problematic iso-segment assignments ( not just multi-cycle ones, including single-cycles)
         for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
             if (!vit->info().active || vit->info().is_dummy) continue;
 
