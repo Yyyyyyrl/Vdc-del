@@ -6,6 +6,10 @@ cmake-build-*/
 .claude/
 data/
 
+#local testing and evaluation tools
+tool/
+t/
+
 # Compiled Object files
 *.o
 *.obj
@@ -37,6 +41,9 @@ bipolar_test_results/
 *.off
 *.ply
 *.csv
+
+# Test scripts
+vdc_test.sh
 
 # Python virtual environment
 .venv/
