@@ -80,5 +80,10 @@ volvis/
 # Library directories (dependencies)
 Library/
 
+# Git attribute
+.gitattributes
+
 # Documents and helping write ups
 *.txt
+*.md 
+!README.md
