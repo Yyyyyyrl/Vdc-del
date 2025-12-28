@@ -11,6 +11,9 @@
 #include <unordered_map>
 #include <set>
 #include <optional>
+#include <array>
+#include <limits>
+#include <cstdint>
 #include <CGAL/Triangle_3.h>
 #include <CGAL/intersections.h>
 
@@ -726,22 +729,66 @@ static bool triangles_have_nontrivial_intersection(
     const Triangle_3& t1,
     const Triangle_3& t2
 ) {
-    // Check if triangles share any vertices
-    std::set<Point, std::less<Point>> t1_verts = {t1.vertex(0), t1.vertex(1), t1.vertex(2)};
-    int shared_count = 0;
-    for (int i = 0; i < 3; ++i) {
-        if (t1_verts.count(t2.vertex(i)) > 0) {
-            shared_count++;
+    // Find shared vertices (by exact position, which is stable for shared mesh vertices).
+    const std::array<Point, 3> t1v = {t1.vertex(0), t1.vertex(1), t1.vertex(2)};
+    const std::array<Point, 3> t2v = {t2.vertex(0), t2.vertex(1), t2.vertex(2)};
+    std::vector<Point> shared;
+    shared.reserve(3);
+    for (const Point& a : t1v) {
+        for (const Point& b : t2v) {
+            if (a == b) {
+                shared.push_back(a);
+                break;
+            }
         }
     }
 
-    // If triangles share 1+ vertices, they touch along a mesh vertex/edge.
-    if (shared_count >= 1) {
+    // If the triangles are disjoint in vertex set, any intersection is non-trivial.
+    if (shared.empty()) {
+        return CGAL::do_intersect(t1, t2);
+    }
+
+    // Shared edge/triangle: adjacent triangles are expected to intersect along their shared simplex.
+    // Overlap beyond that would indicate degeneracy, which we ignore here for performance.
+    if (shared.size() >= 2) {
         return false;
     }
 
-    // Use CGAL's intersection test
-    return CGAL::do_intersect(t1, t2);
+    // Shared single vertex: triangles always intersect at that vertex, so avoid triangle/triangle
+    // intersection tests. A non-trivial intersection must involve the opposite edge of one triangle
+    // intersecting the other triangle away from the shared vertex.
+    const Point& s = shared[0];
+
+    std::array<Point, 2> t1_other;
+    std::array<Point, 2> t2_other;
+    int t1_count = 0;
+    int t2_count = 0;
+    for (const Point& p : t1v) {
+        if (p != s && t1_count < 2) {
+            t1_other[t1_count++] = p;
+        }
+    }
+    for (const Point& p : t2v) {
+        if (p != s && t2_count < 2) {
+            t2_other[t2_count++] = p;
+        }
+    }
+
+    if (t1_count != 2 || t2_count != 2) {
+        return false;
+    }
+
+    const Segment3 t1_opposite(t1_other[0], t1_other[1]);
+    const Segment3 t2_opposite(t2_other[0], t2_other[1]);
+
+    if (CGAL::do_intersect(t1_opposite, t2)) {
+        return true;
+    }
+    if (CGAL::do_intersect(t2_opposite, t1)) {
+        return true;
+    }
+
+    return false;
 }
 
 bool check_self_intersection(
@@ -753,8 +800,8 @@ bool check_self_intersection(
     const auto& cycles = v->info().facet_cycles;
     size_t num_cycles = cycles.size();
 
-    if (num_cycles < 2) {
-        return false; // No self-intersection possible with single cycle
+    if (num_cycles < 1) {
+        return false;
     }
 
     std::vector<Point> original_isovertices = v->info().cycle_isovertices;
@@ -772,7 +819,19 @@ bool check_self_intersection(
     // Restore original isovertices
     mutable_isovertices = original_isovertices;
 
-    // Check all pairs of cycles for intersection
+    // Check for intersections within each cycle fan.
+    for (size_t c = 0; c < num_cycles; ++c) {
+        const auto& tris = cycle_triangles[c];
+        for (size_t i = 0; i < tris.size(); ++i) {
+            for (size_t j = i + 1; j < tris.size(); ++j) {
+                if (triangles_have_nontrivial_intersection(tris[i], tris[j])) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Check all pairs of cycles for intersection.
     for (size_t i = 0; i < num_cycles; ++i) {
         for (size_t j = i + 1; j < num_cycles; ++j) {
             // Check if any triangle from cycle i intersects any triangle from cycle j
@@ -835,62 +894,6 @@ double compute_sphere_radius(
     return 0.1 * min_edge_length;
 }
 
-//! @brief Compute minimum angular separation between points on a sphere
-static double compute_min_angular_separation(
-    const std::vector<Point>& points,
-    const Point& center
-) {
-    if (points.size() < 2) return 2.0 * M_PI; // Maximum separation for single point
-
-    double min_angle = 2.0 * M_PI;
-
-    for (size_t i = 0; i < points.size(); ++i) {
-        for (size_t j = i + 1; j < points.size(); ++j) {
-            // Compute vectors from center to each point
-            Vector3 v1(center, points[i]);
-            Vector3 v2(center, points[j]);
-
-            double len1 = std::sqrt(v1.squared_length());
-            double len2 = std::sqrt(v2.squared_length());
-
-            if (len1 < 1e-10 || len2 < 1e-10) continue;
-
-            // Compute angle between vectors
-            double dot = (v1.x() * v2.x() + v1.y() * v2.y() + v1.z() * v2.z()) / (len1 * len2);
-            dot = std::max(-1.0, std::min(1.0, dot)); // Clamp for numerical stability
-            double angle = std::acos(dot);
-
-            min_angle = std::min(min_angle, angle);
-        }
-    }
-
-    return min_angle;
-}
-
-//! @brief Redistribute points evenly on a sphere
-/*!
- * Places points at evenly distributed positions on the sphere.
- * Uses a simple approach: distribute along a great circle for 2 points,
- * or use vertices of a regular polyhedron for more points.
- */
-static void redistribute_on_sphere(
-    std::vector<Point>& points,
-    const Point& center,
-    double radius
-) {
-    int n = static_cast<int>(points.size());
-    if (n < 2) return;
-
-    // distribute points evenly around a great circle
-    for (int i = 0; i < n; ++i) {
-        double theta = 2.0 * M_PI * i / n;
-        double x = center.x() + radius * std::cos(theta);
-        double y = center.y() + radius * std::sin(theta);
-        double z = center.z();
-        points[i] = Point(x, y, z);
-    }
-}
-
 //! @brief Resolution status enum
 enum class ResolutionStatus {
     NOT_NEEDED,      // No self-intersection detected
@@ -898,6 +901,276 @@ enum class ResolutionStatus {
     RESOLVED_FALLBACK, // Resolved by fallback distribution
     UNRESOLVED       // Could not resolve
 };
+
+enum class ResolutionStrategy {
+    NONE,
+    TWO_CYCLE_DIAMETRIC,
+    CENTROID_PROJECTION,
+    FIBONACCI_FALLBACK
+};
+
+struct ResolutionResult {
+    ResolutionStatus status = ResolutionStatus::NOT_NEEDED;
+    ResolutionStrategy strategy = ResolutionStrategy::NONE;
+};
+
+// ============================================================================
+// Self-intersection resolution helpers
+// ============================================================================
+
+static double vec_dot(const Vector3& a, const Vector3& b) {
+    return a.x() * b.x() + a.y() * b.y() + a.z() * b.z();
+}
+
+static Vector3 vec_cross(const Vector3& a, const Vector3& b) {
+    return Vector3(
+        a.y() * b.z() - a.z() * b.y(),
+        a.z() * b.x() - a.x() * b.z(),
+        a.x() * b.y() - a.y() * b.x());
+}
+
+static double vec_norm(const Vector3& v0) {
+    return std::sqrt(v0.squared_length());
+}
+
+static Vector3 vec_normalize_or(const Vector3& v0, const Vector3& fallback) {
+    const double len = vec_norm(v0);
+    if (len < 1e-12) {
+        return fallback;
+    }
+    return v0 / len;
+}
+
+static Vector3 unit_dir_to_or(const Point& center, const Point& p, const Vector3& fallback) {
+    return vec_normalize_or(Vector3(center, p), fallback);
+}
+
+static double squared_distance(const Point& a, const Point& b) {
+    const double dx = a.x() - b.x();
+    const double dy = a.y() - b.y();
+    const double dz = a.z() - b.z();
+    return dx * dx + dy * dy + dz * dz;
+}
+
+static bool have_min_separation(const std::vector<Point>& candidate, double min_sep2) {
+    const int n = static_cast<int>(candidate.size());
+    for (int i = 0; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            if (squared_distance(candidate[i], candidate[j]) <= min_sep2) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static uint32_t xorshift32(uint32_t& state) {
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+static double rand01(uint32_t& state) {
+    return (xorshift32(state) & 0xFFFFFFu) / static_cast<double>(0x1000000u);
+}
+
+static Vector3 rotate_axis_angle(const Vector3& vec, const Vector3& axis_unit, double angle_rad) {
+    const double c = std::cos(angle_rad);
+    const double s = std::sin(angle_rad);
+
+    const Vector3 term0 = vec * c;
+    const Vector3 term1 = vec_cross(axis_unit, vec) * s;
+    const Vector3 term2 = axis_unit * (vec_dot(axis_unit, vec) * (1.0 - c));
+    return term0 + term1 + term2;
+}
+
+struct IsovertexCandidateEvaluator {
+    Vertex_handle v;
+    const Delaunay& dt;
+    const std::unordered_map<int, Cell_handle>& cell_map;
+    const std::vector<Point>& original_positions;
+    double min_sep2 = 0.0;
+
+    bool found_candidate = false;
+    double best_cost = std::numeric_limits<double>::infinity();
+    std::vector<Point> best_candidate;
+    ResolutionStatus best_status = ResolutionStatus::UNRESOLVED;
+    ResolutionStrategy best_strategy = ResolutionStrategy::NONE;
+
+    bool accept_if_better(
+        const std::vector<Point>& candidate,
+        ResolutionStatus status,
+        ResolutionStrategy strategy
+    ) {
+        if (!have_min_separation(candidate, min_sep2)) {
+            return false;
+        }
+        if (check_self_intersection(v, candidate, dt, cell_map)) {
+            return false;
+        }
+
+        const int n = static_cast<int>(candidate.size());
+        double cost = 0.0;
+        for (int i = 0; i < n; ++i) {
+            cost += squared_distance(candidate[i], original_positions[i]);
+        }
+
+        if (!found_candidate || cost < best_cost) {
+            found_candidate = true;
+            best_cost = cost;
+            best_candidate = candidate;
+            best_status = status;
+            best_strategy = strategy;
+            return true;
+        }
+
+        return false;
+    }
+};
+
+static void add_centroid_projection_candidates(
+    const Point& center,
+    double base_radius,
+    const std::vector<Point>& centroids,
+    IsovertexCandidateEvaluator& evaluator
+) {
+    const double radius_scales[] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0};
+    const int n = static_cast<int>(centroids.size());
+    for (double scale : radius_scales) {
+        const double r = base_radius * scale;
+        std::vector<Point> candidate(n);
+        for (int c = 0; c < n; ++c) {
+            candidate[c] = project_to_sphere(centroids[c], center, r);
+        }
+        evaluator.accept_if_better(
+            candidate,
+            ResolutionStatus::RESOLVED_SPHERE,
+            ResolutionStrategy::CENTROID_PROJECTION);
+    }
+}
+
+static void add_two_cycle_diametric_opposite_candidates(
+    const Point& center,
+    double base_radius,
+    const std::vector<Point>& centroids,
+    IsovertexCandidateEvaluator& evaluator
+) {
+    if (centroids.size() != 2) {
+        return;
+    }
+
+    auto diametric_opposite = [&](const Point& p) -> Point {
+        return Point(
+            2.0 * center.x() - p.x(),
+            2.0 * center.y() - p.y(),
+            2.0 * center.z() - p.z());
+    };
+
+    const double radius_scales[] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0};
+    for (double scale : radius_scales) {
+        const double r = base_radius * scale;
+
+        const Point vposA = project_to_sphere(centroids[0], center, r);
+        std::vector<Point> cand(2);
+        cand[0] = vposA;
+        cand[1] = diametric_opposite(vposA);
+        evaluator.accept_if_better(
+            cand,
+            ResolutionStatus::RESOLVED_FALLBACK,
+            ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
+
+        const Point vposB = project_to_sphere(centroids[1], center, r);
+        cand[1] = vposB;
+        cand[0] = diametric_opposite(vposB);
+        evaluator.accept_if_better(
+            cand,
+            ResolutionStatus::RESOLVED_FALLBACK,
+            ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
+    }
+}
+
+static void add_fibonacci_fallback_candidates(
+    const Point& center,
+    double base_radius,
+    const std::vector<Vector3>& centroid_dirs,
+    IsovertexCandidateEvaluator& evaluator
+) {
+    const int n = static_cast<int>(centroid_dirs.size());
+    if (n < 1) {
+        return;
+    }
+
+    const double golden_angle = M_PI * (3.0 - std::sqrt(5.0));
+    const std::vector<double> fallback_scales = (n == 1)
+        ? std::vector<double>{0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0}
+        : std::vector<double>{3.0, 4.0, 6.0, 8.0, 10.0};
+    const int fallback_attempts = (n == 1) ? 32 : 16;
+
+    for (double s : fallback_scales) {
+        const double r = base_radius * s;
+
+        for (int attempt = 0; attempt < fallback_attempts; ++attempt) {
+            uint32_t prng = static_cast<uint32_t>(evaluator.v->info().index) * 747796405u +
+                            static_cast<uint32_t>(attempt) * 2891336453u + 277803737u;
+
+            const Vector3 axis = vec_normalize_or(
+                Vector3(2.0 * rand01(prng) - 1.0, 2.0 * rand01(prng) - 1.0, 2.0 * rand01(prng) - 1.0),
+                Vector3(1, 0, 0));
+            const double angle = 2.0 * M_PI * rand01(prng);
+
+            // Generate evenly-distributed unit directions.
+            std::vector<Vector3> dirs(n);
+            for (int i = 0; i < n; ++i) {
+                const double t = (static_cast<double>(i) + 0.5) / static_cast<double>(n);
+                const double z = 1.0 - 2.0 * t;
+                const double xy = std::sqrt(std::max(0.0, 1.0 - z * z));
+                const double theta = golden_angle * static_cast<double>(i);
+                const Vector3 base_dir(xy * std::cos(theta), xy * std::sin(theta), z);
+                dirs[i] = vec_normalize_or(rotate_axis_angle(base_dir, axis, angle), base_dir);
+            }
+
+            // Greedy assignment of generated directions to cycles to stay near centroid directions.
+            std::vector<int> assign(n, -1);
+            std::vector<bool> used(n, false);
+            for (int c = 0; c < n; ++c) {
+                double best_score = -std::numeric_limits<double>::infinity();
+                int best_i = -1;
+                for (int i = 0; i < n; ++i) {
+                    if (used[i]) continue;
+                    const double score = vec_dot(dirs[i], centroid_dirs[c]);
+                    if (score > best_score) {
+                        best_score = score;
+                        best_i = i;
+                    }
+                }
+                if (best_i < 0) {
+                    best_i = c;
+                }
+                assign[c] = best_i;
+                used[best_i] = true;
+            }
+
+            std::vector<Point> candidate(n);
+            for (int c = 0; c < n; ++c) {
+                candidate[c] = center + dirs[assign[c]] * r;
+            }
+
+            evaluator.accept_if_better(
+                candidate,
+                ResolutionStatus::RESOLVED_FALLBACK,
+                ResolutionStrategy::FIBONACCI_FALLBACK);
+
+            if (n == 2) {
+                std::swap(candidate[0], candidate[1]);
+                evaluator.accept_if_better(
+                    candidate,
+                    ResolutionStatus::RESOLVED_FALLBACK,
+                    ResolutionStrategy::FIBONACCI_FALLBACK);
+            }
+        }
+    }
+}
 
 //! @brief Attempt to resolve self-intersection for a multi-cycle vertex
 /*!
@@ -913,7 +1186,7 @@ enum class ResolutionStatus {
  * @param cell_map Map from cell indices to cell handles
  * @return Resolution status indicating what happened
  */
-ResolutionStatus resolve_self_intersection(
+ResolutionResult resolve_self_intersection(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
@@ -921,64 +1194,95 @@ ResolutionStatus resolve_self_intersection(
     float isovalue,
     const std::unordered_map<int, Cell_handle>& cell_map
 ) {
-    // Check if resolution is needed
     if (!check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
-        return ResolutionStatus::NOT_NEEDED;
+        return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
     }
 
     const auto& cycles = v->info().facet_cycles;
-    Point center = v->point();
-    int n = static_cast<int>(cycle_isovertices.size());
+    const Point center = v->point();
+    const int n = static_cast<int>(cycle_isovertices.size());
 
-    if (n < 2) return ResolutionStatus::NOT_NEEDED;
+    if (n < 1) {
+        return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
+    }
 
-    // Save original positions to restore if all attempts fail
-    std::vector<Point> original_positions = cycle_isovertices;
-
+    const std::vector<Point> original_positions = cycle_isovertices;
     const double base_radius = compute_sphere_radius(v, dt, grid);
 
-    // 1 Try increasing sphere radius (1x, 2x, 3x)
-    for (int attempt = 1; attempt <= 3; ++attempt) {
-        const double sphere_radius = base_radius * attempt;
-        
-        // Recompute centroids and project to larger sphere
-        for (size_t c = 0; c < cycles.size(); ++c) {
-            Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
-                dt, grid, isovalue, v, cycles[c], cell_map);
-            cycle_isovertices[c] = project_to_sphere(centroid, center, sphere_radius);
+    // Precompute centroids per-cycle once.
+    std::vector<Point> centroids(n);
+    for (int c = 0; c < n; ++c) {
+        centroids[c] = compute_centroid_of_voronoi_edge_and_isosurface(
+            dt, grid, isovalue, v, cycles[c], cell_map);
+    }
+
+    std::vector<Vector3> centroid_dirs(n);
+    for (int i = 0; i < n; ++i) {
+        centroid_dirs[i] = unit_dir_to_or(center, centroids[i], Vector3(1, 0, 0));
+    }
+
+    const double min_sep = std::max(1e-8, base_radius * 1e-3);
+    const double min_sep2 = min_sep * min_sep;
+
+    // Two-cycle special case 
+    // keep one isovertex on the current sphere and place the other diametrically opposite.
+    if (n == 2) {
+        auto diametric_opposite = [&](const Point& p) -> Point {
+            return Point(
+                2.0 * center.x() - p.x(),
+                2.0 * center.y() - p.y(),
+                2.0 * center.z() - p.z());
+        };
+
+        // vposB2 = 2*(v0 - vposA) + vposA = 2*v0 - vposA
+        {
+            std::vector<Point> candidate = original_positions;
+            candidate[1] = diametric_opposite(original_positions[0]);
+            if (have_min_separation(candidate, min_sep2) &&
+                !check_self_intersection(v, candidate, dt, cell_map)) {
+                cycle_isovertices = candidate;
+                return {ResolutionStatus::RESOLVED_FALLBACK, ResolutionStrategy::TWO_CYCLE_DIAMETRIC};
+            }
         }
 
-        // Check if this resolves the intersection
-        if (!check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
-            return ResolutionStatus::RESOLVED_SPHERE;
+        // vposA2 = 2*(v0 - vposB) + vposB = 2*v0 - vposB
+        {
+            std::vector<Point> candidate = original_positions;
+            candidate[0] = diametric_opposite(original_positions[1]);
+            if (have_min_separation(candidate, min_sep2) &&
+                !check_self_intersection(v, candidate, dt, cell_map)) {
+                cycle_isovertices = candidate;
+                return {ResolutionStatus::RESOLVED_FALLBACK, ResolutionStrategy::TWO_CYCLE_DIAMETRIC};
+            }
         }
     }
 
-    // 2 Try uniform distribution with a few rotations
-    const double sphere_radius = base_radius * 3.0;
-    
-    for (int rot = 0; rot < 3; ++rot) {
-        double rotation = 2.0 * M_PI * rot / 3.0;  // 0, 120, 240 degrees
-        
-        for (int i = 0; i < n; ++i) {
-            double theta = 2.0 * M_PI * i / n + rotation;
-            double phi = (n > 2) ? std::acos(1.0 - 2.0 * (i + 0.5) / n) : M_PI / 2.0;
-            double x = center.x() + sphere_radius * std::sin(phi) * std::cos(theta);
-            double y = center.y() + sphere_radius * std::sin(phi) * std::sin(theta);
-            double z = center.z() + sphere_radius * std::cos(phi);
-            cycle_isovertices[i] = Point(x, y, z);
-        }
+    IsovertexCandidateEvaluator evaluator{v, dt, cell_map, original_positions, min_sep2};
 
-        if (!check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
-            return ResolutionStatus::RESOLVED_FALLBACK;
-        }
+    add_centroid_projection_candidates(center, base_radius, centroids, evaluator);
+
+    // If simple centroid-based placements resolve the issue, avoid expensive fallbacks.
+    if (evaluator.found_candidate) {
+        cycle_isovertices = evaluator.best_candidate;
+        return {evaluator.best_status, evaluator.best_strategy};
     }
 
-    // restore original positions (from sphere projection attempt 1)
+    if (n == 2) {
+        add_two_cycle_diametric_opposite_candidates(center, base_radius, centroids, evaluator);
+    }
+
+    if (!evaluator.found_candidate) {
+        add_fibonacci_fallback_candidates(center, base_radius, centroid_dirs, evaluator);
+    }
+
+    if (evaluator.found_candidate) {
+        cycle_isovertices = evaluator.best_candidate;
+        return {evaluator.best_status, evaluator.best_strategy};
+    }
+
     cycle_isovertices = original_positions;
 
-    // Debug output for unresolved cases
-    DEBUG_PRINT("[DEBUG-UNRESOLVED] Vertex " << v->info().index 
+    DEBUG_PRINT("[DEBUG-UNRESOLVED] Vertex " << v->info().index
                 << " at (" << center.x() << ", " << center.y() << ", " << center.z() << ")"
                 << " has " << n << " cycles, could not resolve self-intersection");
     for (int i = 0; i < n; ++i) {
@@ -986,16 +1290,15 @@ ResolutionStatus resolve_self_intersection(
                     << cycle_isovertices[i].x() << ", "
                     << cycle_isovertices[i].y() << ", "
                     << cycle_isovertices[i].z() << ")");
-        // Also output the facets in this cycle
-        DEBUG_PRINT("[DEBUG-UNRESOLVED]     Cycle " << i << " contains " 
+        DEBUG_PRINT("[DEBUG-UNRESOLVED]     Cycle " << i << " contains "
                     << cycles[i].size() << " facets:");
         for (const auto& fkey : cycles[i]) {
-            DEBUG_PRINT("[DEBUG-UNRESOLVED]       Facet (cell=" << fkey.first 
+            DEBUG_PRINT("[DEBUG-UNRESOLVED]       Facet (cell=" << fkey.first
                         << ", local_idx=" << fkey.second << ")");
         }
     }
 
-    return ResolutionStatus::UNRESOLVED;
+    return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::NONE};
 }
 
 void compute_cycle_isovertices(
@@ -1011,9 +1314,18 @@ void compute_cycle_isovertices(
     int self_intersection_detected = 0;
     int self_intersection_resolved = 0;
     int self_intersection_fallback = 0;
+    int self_intersection_unresolved = 0;
+    bool had_unresolved = false;
+
+    int64_t strat_two_cycle_diametric = 0;
+    int64_t strat_centroid_projection = 0;
+    int64_t strat_fibonacci_fallback = 0;
 
     // Build cell lookup map ONCE for the entire function usage
     std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
+
+    // Track multi-cycle vertices for faster processing in the resolution pass.
+    std::vector<Vertex_handle> multi_cycle_vertices;
 
     // Pass 1: compute initial isovertices for all active vertices.
     for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
@@ -1045,43 +1357,365 @@ void compute_cycle_isovertices(
 
                 isovertices[c] = project_to_sphere(centroid, cube_center, sphere_radius);
             }
+            multi_cycle_vertices.push_back(vit);
             multi_cycle_count++;
         }
     }
 
-    // Pass 2: resolve self-intersections after all isovertices are assigned.
-    for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
-        if (!vit->info().active) continue;
-        if (vit->info().is_dummy) continue;
+    // Pass 2: resolve self-intersections on multi-cycle vertices.
+    // A small number of stabilization passes catches cases where changing one multi-cycle vertex
+    // introduces a new conflict at another multi-cycle vertex.
+    std::vector<Vertex_handle> modified_multi_cycle_vertices;
+    std::unordered_set<int> modified_multi_cycle_indices;
 
-        auto& cycles = vit->info().facet_cycles;
-        auto& isovertices = vit->info().cycle_isovertices;
+    const int MAX_MULTI_CYCLE_PASSES = 3;
+    for (int pass = 0; pass < MAX_MULTI_CYCLE_PASSES; ++pass) {
+        bool any_changed = false;
 
-        if (cycles.size() < 2) continue;
+        int pass_detected = 0;
+        int pass_resolved = 0;
+        int pass_fallback = 0;
+        int pass_unresolved = 0;
 
-        // Call the resolution function which handles all strategies
-        ResolutionStatus status = resolve_self_intersection(
-            vit, isovertices, dt, grid, isovalue, cell_map);
+        for (Vertex_handle vh : multi_cycle_vertices) {
+            if (!vh->info().active) continue;
+            if (vh->info().is_dummy) continue;
+            if (vh->info().facet_cycles.size() < 2) continue;
 
-        // For testing and debug purpose
-        switch (status) {
-            case ResolutionStatus::NOT_NEEDED:
-                // No self-intersection was present
-                break;
-            case ResolutionStatus::RESOLVED_SPHERE:
-                self_intersection_detected++;
-                self_intersection_resolved++;
-                break;
-            case ResolutionStatus::RESOLVED_FALLBACK:
-                self_intersection_detected++;
-                self_intersection_fallback++;
-                break;
-            case ResolutionStatus::UNRESOLVED:
-                self_intersection_detected++;
-                // Intersection remains - will be counted as unresolved
-                break;
+            auto& isovertices = vh->info().cycle_isovertices;
+
+            const ResolutionResult result = resolve_self_intersection(
+                vh, isovertices, dt, grid, isovalue, cell_map);
+            const ResolutionStatus status = result.status;
+
+            if (status != ResolutionStatus::NOT_NEEDED) {
+                pass_detected++;
+            }
+
+            switch (status) {
+                case ResolutionStatus::NOT_NEEDED:
+                    break;
+                case ResolutionStatus::RESOLVED_SPHERE:
+                    any_changed = true;
+                    pass_resolved++;
+                    switch (result.strategy) {
+                        case ResolutionStrategy::CENTROID_PROJECTION:
+                            strat_centroid_projection++;
+                            break;
+                        case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
+                            strat_two_cycle_diametric++;
+                            break;
+                        case ResolutionStrategy::FIBONACCI_FALLBACK:
+                            strat_fibonacci_fallback++;
+                            break;
+                        default:
+                            break;
+                    }
+                    break;
+                case ResolutionStatus::RESOLVED_FALLBACK:
+                    any_changed = true;
+                    pass_fallback++;
+                    switch (result.strategy) {
+                        case ResolutionStrategy::CENTROID_PROJECTION:
+                            strat_centroid_projection++;
+                            break;
+                        case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
+                            strat_two_cycle_diametric++;
+                            break;
+                        case ResolutionStrategy::FIBONACCI_FALLBACK:
+                            strat_fibonacci_fallback++;
+                            break;
+                        default:
+                            break;
+                    }
+                    break;
+                case ResolutionStatus::UNRESOLVED:
+                    had_unresolved = true;
+                    pass_unresolved++;
+                    self_intersection_unresolved++;
+                    break;
+            }
+
+            if (status == ResolutionStatus::RESOLVED_SPHERE ||
+                status == ResolutionStatus::RESOLVED_FALLBACK ||
+                status == ResolutionStatus::UNRESOLVED) {
+                if (modified_multi_cycle_indices.insert(vh->info().index).second) {
+                    modified_multi_cycle_vertices.push_back(vh);
+                }
+            }
+        }
+
+        self_intersection_detected += pass_detected;
+        self_intersection_resolved += pass_resolved;
+        self_intersection_fallback += pass_fallback;
+
+        if (pass_detected > 0) {
+            DEBUG_PRINT("[DEL-SELFI] multi-cycle pass " << (pass + 1) << "/" << MAX_MULTI_CYCLE_PASSES
+                        << ": detected=" << pass_detected
+                        << ", resolved=" << pass_resolved
+                        << ", fallback=" << pass_fallback
+                        << ", unresolved=" << pass_unresolved);
+        }
+
+        if (!any_changed) {
+            break;
         }
     }
+
+    // Targeted cleanup: In rare cases, changing multi-cycle vertices can introduce self-intersections
+    // in nearby single-cycle fans. To limit overhead, only check single-cycle vertices within 2 hops
+    // of the multi-cycle vertices which were actually modified (or remained unresolved).
+    if (!modified_multi_cycle_vertices.empty()) {
+        std::vector<Vertex_handle> single_cycle_candidates;
+        std::unordered_set<int> single_cycle_candidate_indices;
+
+        auto add_single_cycle_candidates_within_hops = [&](
+            const std::vector<Vertex_handle>& seeds,
+            int max_hops
+        ) {
+            std::unordered_set<int> visited_indices;
+            visited_indices.reserve(seeds.size() * 8);
+
+            std::vector<Vertex_handle> frontier = seeds;
+            for (Vertex_handle vh : frontier) {
+                visited_indices.insert(vh->info().index);
+            }
+
+            for (int depth = 0; depth < max_hops; ++depth) {
+                std::vector<Vertex_handle> next_frontier;
+                next_frontier.reserve(frontier.size() * 4);
+
+                for (Vertex_handle src : frontier) {
+                    std::vector<Edge> incident_edges;
+                    dt.incident_edges(src, std::back_inserter(incident_edges));
+
+                    for (const Edge& e : incident_edges) {
+                        Vertex_handle a = e.first->vertex(e.second);
+                        Vertex_handle b = e.first->vertex(e.third);
+                        Vertex_handle other = (a == src) ? b : a;
+
+                        if (dt.is_infinite(other)) continue;
+                        if (other->info().is_dummy) continue;
+                        if (!other->info().active) continue;
+
+                        const int other_idx = other->info().index;
+                        if (visited_indices.insert(other_idx).second) {
+                            next_frontier.push_back(other);
+                        }
+
+                        if (other->info().facet_cycles.size() == 1) {
+                            if (single_cycle_candidate_indices.insert(other_idx).second) {
+                                single_cycle_candidates.push_back(other);
+                            }
+                        }
+                    }
+                }
+
+                frontier.swap(next_frontier);
+                if (frontier.empty()) {
+                    break;
+                }
+            }
+        };
+
+        add_single_cycle_candidates_within_hops(modified_multi_cycle_vertices, /*max_hops=*/2);
+
+        const int MAX_SINGLE_CYCLE_PASSES = 2;
+        const int MAX_EXPANSION_ROUNDS = 2;
+        for (int round = 0; round < MAX_EXPANSION_ROUNDS; ++round) {
+            std::vector<Vertex_handle> unresolved_vertices;
+            unresolved_vertices.reserve(32);
+
+            for (int pass = 0; pass < MAX_SINGLE_CYCLE_PASSES; ++pass) {
+                bool any_changed = false;
+
+                int pass_detected = 0;
+                int pass_resolved = 0;
+                int pass_fallback = 0;
+                int pass_unresolved = 0;
+
+                unresolved_vertices.clear();
+
+                for (Vertex_handle vh : single_cycle_candidates) {
+                    if (!vh->info().active) continue;
+                    if (vh->info().is_dummy) continue;
+                    if (vh->info().facet_cycles.size() != 1) continue;
+
+                    auto& isovertices = vh->info().cycle_isovertices;
+                    const ResolutionResult result = resolve_self_intersection(
+                        vh, isovertices, dt, grid, isovalue, cell_map);
+                    const ResolutionStatus status = result.status;
+
+                    if (status != ResolutionStatus::NOT_NEEDED) {
+                        pass_detected++;
+                    }
+
+                    switch (status) {
+                        case ResolutionStatus::NOT_NEEDED:
+                            break;
+                        case ResolutionStatus::RESOLVED_SPHERE:
+                            any_changed = true;
+                            pass_resolved++;
+                            switch (result.strategy) {
+                                case ResolutionStrategy::CENTROID_PROJECTION:
+                                    strat_centroid_projection++;
+                                    break;
+                                case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
+                                    strat_two_cycle_diametric++;
+                                    break;
+                                case ResolutionStrategy::FIBONACCI_FALLBACK:
+                                    strat_fibonacci_fallback++;
+                                    break;
+                                default:
+                                    break;
+                            }
+                            break;
+                        case ResolutionStatus::RESOLVED_FALLBACK:
+                            any_changed = true;
+                            pass_fallback++;
+                            switch (result.strategy) {
+                                case ResolutionStrategy::CENTROID_PROJECTION:
+                                    strat_centroid_projection++;
+                                    break;
+                                case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
+                                    strat_two_cycle_diametric++;
+                                    break;
+                                case ResolutionStrategy::FIBONACCI_FALLBACK:
+                                    strat_fibonacci_fallback++;
+                                    break;
+                                default:
+                                    break;
+                            }
+                            break;
+                        case ResolutionStatus::UNRESOLVED:
+                            had_unresolved = true;
+                            pass_unresolved++;
+                            self_intersection_unresolved++;
+                            unresolved_vertices.push_back(vh);
+                            break;
+                    }
+                }
+
+                self_intersection_detected += pass_detected;
+                self_intersection_resolved += pass_resolved;
+                self_intersection_fallback += pass_fallback;
+
+                if (pass_detected > 0) {
+                    DEBUG_PRINT("[DEL-SELFI] single-cycle pass " << (pass + 1) << "/" << MAX_SINGLE_CYCLE_PASSES
+                                << ": detected=" << pass_detected
+                                << ", resolved=" << pass_resolved
+                                << ", fallback=" << pass_fallback
+                                << ", unresolved=" << pass_unresolved);
+                }
+
+                if (!any_changed) {
+                    break;
+                }
+            }
+
+            if (unresolved_vertices.empty()) {
+                break;
+            }
+
+            // Expand the candidate region around unresolved single-cycle vertices and try again.
+            const size_t before = single_cycle_candidates.size();
+            add_single_cycle_candidates_within_hops(unresolved_vertices, /*max_hops=*/2);
+            if (single_cycle_candidates.size() == before) {
+                break;
+            }
+        }
+    }
+
+    // Small-mesh fallback: If we still encountered unresolved cases, run a global pass over single-cycle
+    // vertices to catch fan self-intersections which may not be adjacent to modified multi-cycle vertices.
+    // This is restricted to small meshes to avoid large performance regressions.
+    const int MAX_GLOBAL_SINGLE_CYCLE_VERTICES = 20000;
+    if (had_unresolved && single_cycle_count <= MAX_GLOBAL_SINGLE_CYCLE_VERTICES) {
+        const int MAX_GLOBAL_SINGLE_CYCLE_PASSES = 2;
+        for (int pass = 0; pass < MAX_GLOBAL_SINGLE_CYCLE_PASSES; ++pass) {
+            bool any_changed = false;
+
+            int pass_detected = 0;
+            int pass_resolved = 0;
+            int pass_fallback = 0;
+            int pass_unresolved = 0;
+
+            for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
+                if (!vit->info().active) continue;
+                if (vit->info().is_dummy) continue;
+                if (vit->info().facet_cycles.size() != 1) continue;
+
+                auto& isovertices = vit->info().cycle_isovertices;
+                const ResolutionResult result = resolve_self_intersection(
+                    vit, isovertices, dt, grid, isovalue, cell_map);
+                const ResolutionStatus status = result.status;
+
+                if (status != ResolutionStatus::NOT_NEEDED) {
+                    pass_detected++;
+                }
+
+                switch (status) {
+                    case ResolutionStatus::NOT_NEEDED:
+                        break;
+                    case ResolutionStatus::RESOLVED_SPHERE:
+                        any_changed = true;
+                        pass_resolved++;
+                        switch (result.strategy) {
+                            case ResolutionStrategy::CENTROID_PROJECTION:
+                                strat_centroid_projection++;
+                                break;
+                            case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
+                                strat_two_cycle_diametric++;
+                                break;
+                            case ResolutionStrategy::FIBONACCI_FALLBACK:
+                                strat_fibonacci_fallback++;
+                                break;
+                            default:
+                                break;
+                        }
+                        break;
+                    case ResolutionStatus::RESOLVED_FALLBACK:
+                        any_changed = true;
+                        pass_fallback++;
+                        switch (result.strategy) {
+                            case ResolutionStrategy::CENTROID_PROJECTION:
+                                strat_centroid_projection++;
+                                break;
+                            case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
+                                strat_two_cycle_diametric++;
+                                break;
+                            case ResolutionStrategy::FIBONACCI_FALLBACK:
+                                strat_fibonacci_fallback++;
+                                break;
+                            default:
+                                break;
+                        }
+                        break;
+                    case ResolutionStatus::UNRESOLVED:
+                        pass_unresolved++;
+                        self_intersection_unresolved++;
+                        break;
+                }
+            }
+
+            self_intersection_detected += pass_detected;
+            self_intersection_resolved += pass_resolved;
+            self_intersection_fallback += pass_fallback;
+
+            if (pass_detected > 0) {
+                DEBUG_PRINT("[DEL-SELFI] global single-cycle pass " << (pass + 1) << "/" << MAX_GLOBAL_SINGLE_CYCLE_PASSES
+                            << ": detected=" << pass_detected
+                            << ", resolved=" << pass_resolved
+                            << ", fallback=" << pass_fallback
+                            << ", unresolved=" << pass_unresolved);
+            }
+
+            if (!any_changed) {
+                break;
+            }
+        }
+    }
+
 
     DEBUG_PRINT("[DEL-ISOV] Computed isovertices for "
                 << single_cycle_count << " single-cycle and "
@@ -1089,7 +1723,27 @@ void compute_cycle_isovertices(
 
     if (self_intersection_detected > 0) {
         DEBUG_PRINT("[DEL-SELFI] Self-intersection stats: "
-                    << self_intersection_detected << " detected.");
+                    << "detected=" << self_intersection_detected
+                    << ", resolved_sphere=" << self_intersection_resolved
+                    << ", resolved_fallback=" << self_intersection_fallback
+                    << ", unresolved=" << self_intersection_unresolved);
+
+        const int64_t resolved_total = strat_two_cycle_diametric +
+                                      strat_centroid_projection +
+                                      strat_fibonacci_fallback;
+        if (resolved_total > 0) {
+            auto pct = [&](int64_t count) -> int {
+                return static_cast<int>((count * 100 + resolved_total / 2) / resolved_total);
+            };
+
+            DEBUG_PRINT("[DEL-SELFI] Resolution strategy breakdown:");
+            DEBUG_PRINT("[DEL-SELFI]   centroid_projection: " << strat_centroid_projection
+                        << " (" << pct(strat_centroid_projection) << "%)");
+            DEBUG_PRINT("[DEL-SELFI]   two_cycle_diametric: " << strat_two_cycle_diametric
+                        << " (" << pct(strat_two_cycle_diametric) << "%)");
+            DEBUG_PRINT("[DEL-SELFI]   fibonacci_fallback: " << strat_fibonacci_fallback
+                        << " (" << pct(strat_fibonacci_fallback) << "%)");
+        }
     }
 }
 
@@ -1583,4 +2237,3 @@ ModifyCyclesResult modify_cycles_pass(Delaunay& dt) {
 
     return result;
 }
-
