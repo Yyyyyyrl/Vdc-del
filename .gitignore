@@ -79,3 +79,6 @@ volvis/
 
 # Library directories (dependencies)
 Library/
+
+# Documents and helping write ups
+*.txt
