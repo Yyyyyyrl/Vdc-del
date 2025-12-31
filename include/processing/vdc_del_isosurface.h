@@ -6,7 +6,7 @@
 
 #include "core/vdc_type.h"
 #include "processing/vdc_grid.h"
-#include <map>
+#include <unordered_map>
 #include <array>
 
 //! @brief Structure to hold the extracted isosurface from Delaunay-based algorithm.
@@ -16,6 +16,14 @@
  */
 struct DelaunayIsosurface
 {
+    struct VertexCycleKeyHash {
+        std::size_t operator()(const std::pair<int, int>& key) const noexcept {
+            const std::size_t h1 = std::hash<int>{}(key.first);
+            const std::size_t h2 = std::hash<int>{}(key.second);
+            return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+        }
+    };
+
     //! @brief Isosurface vertex positions (one or more per active Delaunay vertex)
     std::vector<Point> isovertices;
 
@@ -29,7 +37,7 @@ struct DelaunayIsosurface
     std::vector<std::array<int, 3>> triangles;
 
     //! @brief Mapping from (delaunay_vertex_index, cycle_index) -> isovertex index
-    std::map<std::pair<int, int>, int> vertex_cycle_to_isovertex;
+    std::unordered_map<std::pair<int, int>, int, VertexCycleKeyHash> vertex_cycle_to_isovertex;
 
     //! @brief Clear all data
     void clear() {
