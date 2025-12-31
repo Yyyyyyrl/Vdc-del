@@ -6,7 +6,6 @@
 
 #include "processing/vdc_del_isosurface.h"
 #include "core/vdc_debug.h"
-#include <unordered_map>
 
 // ============================================================================
 // Step 10: Generate Isosurface Triangles
@@ -22,11 +21,10 @@ void generate_isosurface_triangles(
 
     int isovertex_idx = 0;
 
-    // Build a map from vertex handles to indices for quick lookup
-    std::unordered_map<int, Vertex_handle> vertex_map;
-    for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
-        vertex_map[vit->info().index] = vit;
-    }
+    iso_surface.isovertices.reserve(dt.number_of_vertices());
+    iso_surface.isovertex_delaunay_vertex.reserve(dt.number_of_vertices());
+    iso_surface.isovertex_cycle_index.reserve(dt.number_of_vertices());
+    iso_surface.vertex_cycle_to_isovertex.reserve(dt.number_of_vertices());
 
     // Collect all isovertices from active vertices
     for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
@@ -44,12 +42,7 @@ void generate_isosurface_triangles(
     }
 
     DEBUG_PRINT("[DEL-TRI] Collected " << iso_surface.isovertices.size() << " isovertices");
-
-    // Build cell index -> handle map
-    std::unordered_map<int, Cell_handle> cell_map;
-    for (auto cit = dt.finite_cells_begin(); cit != dt.finite_cells_end(); ++cit) {
-        cell_map[cit->info().index] = cit;
-    }
+    iso_surface.triangles.reserve(iso_surface.isovertices.size() * 2);
 
     // Generate triangles from isosurface facets
     int degenerate_count = 0;
