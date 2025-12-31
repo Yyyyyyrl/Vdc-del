@@ -4,6 +4,7 @@
 #include "vdc_io.h"
 #include <fstream>
 #include <iomanip>
+#include <vector>
 
 // ============================================================================
 // OFF Format Output
@@ -15,6 +16,9 @@ void write_off_delaunay(const std::string &filename, const DelaunayIsosurface &i
         std::cerr << "Error: Could not open file " << filename << " for writing." << std::endl;
         return;
     }
+
+    std::vector<char> buffer(8 * 1024 * 1024);
+    out.rdbuf()->pubsetbuf(buffer.data(), static_cast<std::streamsize>(buffer.size()));
 
     // OFF header
     out << "OFF\n";
@@ -51,6 +55,9 @@ void write_ply_delaunay(const std::string &filename, const DelaunayIsosurface &i
         std::cerr << "Error: Could not open file " << filename << " for writing." << std::endl;
         return;
     }
+
+    std::vector<char> buffer(8 * 1024 * 1024);
+    out.rdbuf()->pubsetbuf(buffer.data(), static_cast<std::streamsize>(buffer.size()));
 
     size_t num_vertices = iso_surface.isovertices.size();
     size_t num_faces = iso_surface.triangles.size();
