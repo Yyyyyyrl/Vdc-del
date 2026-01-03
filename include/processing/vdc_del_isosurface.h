@@ -156,12 +156,14 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
  * @param grid The scalar field grid
  * @param isovalue The isovalue threshold
  * @param position_on_isov If true, Delaunay sites are on isosurface samples (reflected in `v.info().isov`)
+ * @param force_global_single_cycle_pass If true, run a global single-cycle scan even without unresolved cases.
  */
 void compute_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    bool position_on_isov
+    bool position_on_isov,
+    bool force_global_single_cycle_pass
 );
 
 //! @brief Generate isosurface triangles from marked facets.
