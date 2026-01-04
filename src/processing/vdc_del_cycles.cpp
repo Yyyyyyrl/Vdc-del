@@ -2283,7 +2283,7 @@ int find_cycle_containing_facet(
 ) {
     const auto& cycles = v_handle->info().facet_cycles;
 
-    // Fast path: single-cycle vertices only have one cycle, so every incident
+    // Straight forward case: single-cycle vertices only have one cycle, so every incident
     // isosurface facet must belong to cycle 0.
     if (cycles.size() == 1) {
         return 0;
