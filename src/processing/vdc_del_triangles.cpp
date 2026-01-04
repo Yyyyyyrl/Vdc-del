@@ -54,10 +54,12 @@ void generate_isosurface_triangles(
             // Get the 3 vertices of facet i (opposite vertex i)
             // Using CGAL's convention: facet i has vertices at positions (i+1)%4, (i+2)%4, (i+3)%4
             std::array<Vertex_handle, 3> facet_verts;
+            std::array<int, 3> facet_cell_vidx;
             int k = 0;
             for (int j = 0; j < 4; ++j) {
                 if (j != i) {
                     facet_verts[k++] = cit->vertex(j);
+                    facet_cell_vidx[k - 1] = j;
                 }
             }
 
@@ -73,7 +75,17 @@ void generate_isosurface_triangles(
                 int v_idx = v->info().index;
 
                 // Find which cycle this facet belongs to for this vertex
-                int cycle_idx = find_cycle_containing_facet(v, cell_idx, i);
+                int cycle_idx = -1;
+                if (i >= 0 && i < 4 && facet_cell_vidx[j] >= 0 && facet_cell_vidx[j] < 4) {
+                    const int anchor = (i + 1) % 4;
+                    const int slot = (facet_cell_vidx[j] - anchor + 4) % 4;
+                    if (slot >= 0 && slot < 3) {
+                        cycle_idx = cit->info().facet_info[i].dualCellEdgeIndex[slot];
+                    }
+                }
+                if (cycle_idx < 0) {
+                    cycle_idx = find_cycle_containing_facet(v, cell_idx, i);
+                }
 
                 if (cycle_idx < 0) {
                     // This shouldn't happen if facet marking and cycle detection are correct
