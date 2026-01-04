@@ -15,6 +15,7 @@
 #include <array>
 #include <limits>
 #include <cstdint>
+#include <stdexcept>
 #include <CGAL/Triangle_3.h>
 #include <CGAL/intersections.h>
 
@@ -22,16 +23,7 @@
 // Helper: Build cell index lookup
 // ============================================================================
 
-std::unordered_map<int, Cell_handle> build_cell_index_map(const Delaunay& dt) {
-    std::unordered_map<int, Cell_handle> map;
-    map.reserve(static_cast<size_t>(dt.number_of_finite_cells()));
-    for (auto cit = dt.finite_cells_begin(); cit != dt.finite_cells_end(); ++cit) {
-        map.emplace(cit->info().index, cit);
-    }
-    return map;
-}
-
-static std::vector<Cell_handle> build_cell_index_vector(const Delaunay& dt) {
+std::vector<Cell_handle> build_cell_index_vector(const Delaunay& dt) {
     std::vector<Cell_handle> cells(static_cast<size_t>(dt.number_of_finite_cells()));
     for (auto cit = dt.finite_cells_begin(); cit != dt.finite_cells_end(); ++cit) {
         const int idx = cit->info().index;
@@ -61,6 +53,39 @@ static int find_vertex_index_in_cell(const Cell_handle& cell, const Vertex_handl
         }
     }
     return -1;
+}
+
+static void write_facet_cycle_indices_for_vertex(
+    Vertex_handle v_handle,
+    const std::vector<Cell_handle>& cell_by_index
+) {
+    if (v_handle == Vertex_handle()) {
+        return;
+    }
+    const auto& cycles = v_handle->info().facet_cycles;
+    for (size_t c = 0; c < cycles.size(); ++c) {
+        for (const auto& [cell_index, facet_index] : cycles[c]) {
+            Cell_handle cell = lookup_cell(cell_by_index, cell_index);
+            if (cell == Cell_handle()) {
+                continue;
+            }
+            if (facet_index < 0 || facet_index >= 4) {
+                continue;
+            }
+            const int v_local = find_vertex_index_in_cell(cell, v_handle);
+            if (v_local < 0 || v_local >= 4) {
+                continue;
+            }
+            const int anchor = (facet_index + 1) % 4;
+            const int slot = (v_local - anchor + 4) % 4;
+            if (slot < 0 || slot >= 3) {
+                continue;
+            }
+            // Reuse the per-facet per-vertex-slot storage (originally dualCellEdgeIndex)
+            // to cache cycle indices for the Delaunay-based pipeline.
+            cell->info().facet_info[facet_index].dualCellEdgeIndex[slot] = static_cast<int>(c);
+        }
+    }
 }
 
 static Cell_handle cell_between_facet_and_next_facet(
@@ -514,6 +539,7 @@ void compute_facet_cycles(Delaunay& dt) {
 
         // Store cycles in vertex info
         vit->info().facet_cycles = cycles;
+        write_facet_cycle_indices_for_vertex(v_handle, cell_by_index);
 
 
     }
@@ -530,21 +556,26 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
     float isovalue,
     Vertex_handle v_handle,
     const std::vector<std::pair<int, int>>& cycle_facets,
-    const std::unordered_map<int, Cell_handle>& cell_map
+    const std::vector<Cell_handle>& cell_by_index
 ) {
 
     double cx = 0, cy = 0, cz = 0;
     int numI = 0;
 
     for (const auto& [cell_idx, facet_idx] : cycle_facets) {
-        // Get the cell and its neighbor
-        auto it = cell_map.find(cell_idx);
-        if (it == cell_map.end()) continue;
+        if (facet_idx < 0 || facet_idx >= 4) {
+            throw std::runtime_error("Invalid facet index in cycle facets.");
+        }
 
-        Cell_handle cellA = it->second;
+        Cell_handle cellA = lookup_cell(cell_by_index, cell_idx);
+        if (cellA == Cell_handle()) {
+            throw std::runtime_error("Cycle facet references invalid cell index.");
+        }
         Cell_handle cellB = cellA->neighbor(facet_idx);
 
-        if (dt.is_infinite(cellB)) continue;
+        if (dt.is_infinite(cellB)) {
+            throw std::runtime_error("Cycle facet references an infinite neighbor cell.");
+        }
 
         // Get circumcenters (dual Voronoi vertices)
         Point wA = cellA->info().circumcenter;
@@ -554,18 +585,18 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
         float sA = cellA->info().circumcenter_scalar;
         float sB = cellB->info().circumcenter_scalar;
 
-        // Avoid division by zero
-        float denom = sA - sB;
-        if (std::abs(denom) < 1e-10f) continue;
+        // Delaunay facet is only marked isosurface on the positive-cell side, so
+        // (sA - sB) should be strictly positive.
+        const float denom = sA - sB;
+        if (denom <= 0.0f) {
+            throw std::runtime_error("Invalid circumcenter scalar ordering (denom <= 0).");
+        }
 
         // Linear interpolation to find isosurface crossing point
         // p = ((isovalue - sB) * wA + (sA - isovalue) * wB) / (sA - sB)
         //
         // Using p = wA + t * (wB - wA) gives t = (sA - isovalue) / (sA - sB).
         float t = (sA - isovalue) / denom;
-
-        // Clamp t to [0, 1] for safety
-        t = std::max(0.0f, std::min(1.0f, t));
 
         // Interpolate position
         double px = wA.x() + t * (wB.x() - wA.x());
@@ -579,23 +610,11 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
     }
 
     if (numI == 0) {
-        // Fallback to vertex position if no valid intersections
-        return v_handle->point();
+        // According to vdc-DelaunayBased.txt this should never happen.
+        throw std::runtime_error("Compute_centroid_of_Voronoi_edge_and_isosurface(): numI == 0.");
     }
 
     return Point(cx / numI, cy / numI, cz / numI);
-}
-
-Point compute_centroid_of_voronoi_edge_and_isosurface(
-    const Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    Vertex_handle v_handle,
-    const std::vector<std::pair<int, int>>& cycle_facets
-) {
-    const std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
-    return compute_centroid_of_voronoi_edge_and_isosurface(
-        dt, grid, isovalue, v_handle, cycle_facets, cell_map);
 }
 
 Point project_to_sphere(const Point& point, const Point& center, double radius) {
@@ -674,7 +693,7 @@ typedef K::Triangle_3 Triangle_3;
  * @param v The vertex whose cycle we're examining
  * @param cycle_idx Index of the cycle within v's facet_cycles
  * @param cycle_isovertex The isovertex position for this cycle
- * @param cell_map Map from cell indices to cell handles
+ * @param cell_by_index Cell handles indexed by `cell->info().index`
  * @return Vector of Triangle_3 objects for this cycle
  */
 static std::vector<Triangle_3> collect_cycle_triangles(
@@ -682,7 +701,7 @@ static std::vector<Triangle_3> collect_cycle_triangles(
     Vertex_handle v,
     int cycle_idx,
     const Point& cycle_isovertex,
-    const std::unordered_map<int, Cell_handle>& cell_map
+    const std::vector<Cell_handle>& cell_by_index
 ) {
     std::vector<Triangle_3> triangles;
     const auto& cycles = v->info().facet_cycles;
@@ -692,30 +711,36 @@ static std::vector<Triangle_3> collect_cycle_triangles(
     }
 
     const auto& cycle_facets = cycles[cycle_idx];
+    triangles.reserve(cycle_facets.size());
 
     for (const auto& [cell_idx, facet_idx] : cycle_facets) {
-        auto it = cell_map.find(cell_idx);
-        if (it == cell_map.end()) continue;
-
-        Cell_handle ch = it->second;
-
-        // Get the 3 vertices of this facet (excluding the one opposite to facet_idx)
-        std::vector<Vertex_handle> facet_verts;
-        for (int j = 0; j < 4; ++j) {
-            if (j != facet_idx) {
-                facet_verts.push_back(ch->vertex(j));
-            }
+        Cell_handle ch = lookup_cell(cell_by_index, cell_idx);
+        if (ch == Cell_handle()) {
+            continue;
         }
 
-        // Find the two vertices that are not v
-        std::vector<Vertex_handle> other_verts;
-        for (auto vh : facet_verts) {
-            if (vh != v) {
-                other_verts.push_back(vh);
+        // Facet facet_idx is opposite vertex facet_idx, so its 3 vertices are
+        // at indices (facet_idx+1)%4, (facet_idx+2)%4, (facet_idx+3)%4.
+        Vertex_handle other_verts[2] = {Vertex_handle(), Vertex_handle()};
+        int other_slots[2] = {-1, -1};
+        int other_count = 0;
+        for (int t = 0; t < 3; ++t) {
+            const int cell_vertex_idx = (facet_idx + 1 + t) % 4;
+            Vertex_handle vh = ch->vertex(cell_vertex_idx);
+            if (vh == v) {
+                continue;
             }
+            if (other_count < 2) {
+                other_verts[other_count] = vh;
+                other_slots[other_count] = t;
+            }
+            ++other_count;
         }
 
-        if (other_verts.size() != 2) continue;
+        // The facet should contain v (exactly one of the 3 vertices), leaving exactly 2 others.
+        if (other_count != 2) {
+            continue;
+        }
 
         // Get isovertex positions for the other two vertices
         // These vertices may also have cycles - need to find which cycle
@@ -730,14 +755,28 @@ static std::vector<Triangle_3> collect_cycle_triangles(
         Vertex_handle v2 = other_verts[1];
 
         // Find cycle for v1 containing this facet
-        int c1 = find_cycle_containing_facet(v1, cell_idx, facet_idx);
+        int c1 = -1;
+        if (facet_idx >= 0 && facet_idx < 4 &&
+            other_slots[0] >= 0 && other_slots[0] < 3) {
+            c1 = ch->info().facet_info[facet_idx].dualCellEdgeIndex[other_slots[0]];
+        }
+        if (c1 < 0) {
+            c1 = find_cycle_containing_facet(v1, cell_idx, facet_idx);
+        }
         if (c1 >= 0 && c1 < static_cast<int>(v1->info().cycle_isovertices.size())) {
             p2 = v1->info().cycle_isovertices[c1];
             found_p2 = true;
         }
 
         // Find cycle for v2 containing this facet
-        int c2 = find_cycle_containing_facet(v2, cell_idx, facet_idx);
+        int c2 = -1;
+        if (facet_idx >= 0 && facet_idx < 4 &&
+            other_slots[1] >= 0 && other_slots[1] < 3) {
+            c2 = ch->info().facet_info[facet_idx].dualCellEdgeIndex[other_slots[1]];
+        }
+        if (c2 < 0) {
+            c2 = find_cycle_containing_facet(v2, cell_idx, facet_idx);
+        }
         if (c2 >= 0 && c2 < static_cast<int>(v2->info().cycle_isovertices.size())) {
             p3 = v2->info().cycle_isovertices[c2];
             found_p3 = true;
@@ -765,32 +804,38 @@ static bool triangles_have_nontrivial_intersection(
     // Find shared vertices (by exact position, which is stable for shared mesh vertices).
     const std::array<Point, 3> t1v = {t1.vertex(0), t1.vertex(1), t1.vertex(2)};
     const std::array<Point, 3> t2v = {t2.vertex(0), t2.vertex(1), t2.vertex(2)};
-    std::vector<Point> shared;
-    shared.reserve(3);
+    int shared_count = 0;
+    Point shared_point = t1v[0];
     for (const Point& a : t1v) {
         for (const Point& b : t2v) {
             if (a == b) {
-                shared.push_back(a);
+                if (shared_count == 0) {
+                    shared_point = a;
+                }
+                ++shared_count;
                 break;
             }
+        }
+        if (shared_count >= 2) {
+            break;
         }
     }
 
     // If the triangles are disjoint in vertex set, any intersection is non-trivial.
-    if (shared.empty()) {
+    if (shared_count == 0) {
         return CGAL::do_intersect(t1, t2);
     }
 
     // Shared edge/triangle: adjacent triangles are expected to intersect along their shared simplex.
     // Overlap beyond that would indicate degeneracy, which we ignore here for performance.
-    if (shared.size() >= 2) {
+    if (shared_count >= 2) {
         return false;
     }
 
     // Shared single vertex: triangles always intersect at that vertex, so avoid triangle/triangle
     // intersection tests. A non-trivial intersection must involve the opposite edge of one triangle
     // intersecting the other triangle away from the shared vertex.
-    const Point& s = shared[0];
+    const Point& s = shared_point;
 
     std::array<Point, 2> t1_other;
     std::array<Point, 2> t2_other;
@@ -828,7 +873,7 @@ bool check_self_intersection(
     Vertex_handle v,
     const std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    const std::unordered_map<int, Cell_handle>& cell_map
+    const std::vector<Cell_handle>& cell_by_index
 ) {
     const auto& cycles = v->info().facet_cycles;
     size_t num_cycles = cycles.size();
@@ -837,20 +882,19 @@ bool check_self_intersection(
         return false;
     }
 
-    std::vector<Point> original_isovertices = v->info().cycle_isovertices;
-
-    auto& mutable_isovertices = const_cast<std::vector<Point>&>(v->info().cycle_isovertices);
-    mutable_isovertices = cycle_isovertices;
+    // Fast path: for a single-cycle vertex, only check for intersections within the fan.
+    // With fewer than 4 triangles in the fan, all triangle pairs share an edge, and the
+    // non-trivial intersection test ignores those adjacent overlaps.
+    if (num_cycles == 1 && cycles[0].size() < 4) {
+        return false;
+    }
 
     // Collect triangles for each cycle
     std::vector<std::vector<Triangle_3>> cycle_triangles(num_cycles);
     for (size_t c = 0; c < num_cycles; ++c) {
         cycle_triangles[c] = collect_cycle_triangles(
-            dt, v, static_cast<int>(c), cycle_isovertices[c], cell_map);
+            dt, v, static_cast<int>(c), cycle_isovertices[c], cell_by_index);
     }
-
-    // Restore original isovertices
-    mutable_isovertices = original_isovertices;
 
     // Check for intersections within each cycle fan.
     for (size_t c = 0; c < num_cycles; ++c) {
@@ -978,6 +1022,350 @@ static bool have_min_separation(const std::vector<Point>& candidate, double min_
     return true;
 }
 
+// ============================================================================
+//  Orientation/Half-space cycle separation
+// ============================================================================
+
+static CGAL::Orientation opposite_orientation(const CGAL::Orientation o) {
+    switch (o) {
+        case CGAL::POSITIVE:
+            return CGAL::NEGATIVE;
+        case CGAL::NEGATIVE:
+            return CGAL::POSITIVE;
+        default:
+            return o;
+    }
+}
+
+static CGAL::Orientation cell_orientation(const Cell_handle cell) {
+    return CGAL::orientation(
+        cell->vertex(0)->point(),
+        cell->vertex(1)->point(),
+        cell->vertex(2)->point(),
+        cell->vertex(3)->point());
+}
+
+static CGAL::Orientation orientation_with_replaced_delv(
+    const Cell_handle cell,
+    const Vertex_handle v,
+    const Point& p
+) {
+    Point verts[4];
+    for (int i = 0; i < 4; ++i) {
+        Vertex_handle vi = cell->vertex(i);
+        verts[i] = (vi == v) ? p : vi->point();
+    }
+    return CGAL::orientation(verts[0], verts[1], verts[2], verts[3]);
+}
+
+
+static StarCellSetPositionMultiIsov build_star_cell_set_position_multi_isov(
+    const Delaunay& dt,
+    Vertex_handle v0
+) {
+    StarCellSetPositionMultiIsov out;
+
+    std::vector<Cell_handle> incident_cells;
+    dt.incident_cells(v0, std::back_inserter(incident_cells));
+    out.cells.reserve(incident_cells.size());
+    out.local_by_cell_idx.reserve(incident_cells.size() * 2);
+
+    for (Cell_handle ch : incident_cells) {
+        if (dt.is_infinite(ch)) {
+            continue;
+        }
+        const int idx = ch->info().index;
+        if (idx < 0) {
+            continue;
+        }
+        const int local = static_cast<int>(out.cells.size());
+        if (out.local_by_cell_idx.emplace(idx, local).second) {
+            out.cells.push_back(ch);
+        }
+    }
+
+    return out;
+}
+
+static CycleDataPositionMultiIsov build_cycle_data_position_multi_isov(
+    const Delaunay& dt,
+    const std::vector<Cell_handle>& cell_by_index,
+    Vertex_handle v0,
+    const std::vector<std::pair<int, int>>& cycle_facets
+) {
+    CycleDataPositionMultiIsov out;
+    out.facets.reserve(cycle_facets.size());
+
+    std::unordered_set<int> boundary_indices;
+    boundary_indices.reserve(cycle_facets.size() * 2);
+
+    for (const auto& [cell_idx, facet_idx] : cycle_facets) {
+        Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
+        if (cell == Cell_handle()) {
+            continue;
+        }
+        if (dt.is_infinite(cell)) {
+            continue;
+        }
+        if (facet_idx < 0 || facet_idx >= 4) {
+            continue;
+        }
+
+        Facet f{cell, facet_idx};
+        out.facets.push_back(f);
+
+        // Boundary vertices are the facet vertices other than v0.
+        for (int j = 0; j < 4; ++j) {
+            if (j == facet_idx) {
+                continue;
+            }
+            Vertex_handle vh = cell->vertex(j);
+            if (vh == v0) {
+                continue;
+            }
+            if (dt.is_infinite(vh) || vh->info().is_dummy) {
+                continue;
+            }
+            const int idx = vh->info().index;
+            if (boundary_indices.insert(idx).second) {
+                out.boundary_verts.push_back(vh);
+            }
+        }
+    }
+
+    return out;
+}
+
+static bool are_cycle_cells_separated_from_cellA(
+    const Delaunay& dt,
+    const StarCellSetPositionMultiIsov& star,
+    Vertex_handle v0,
+    const std::vector<Facet>& cycle_facets,
+    Cell_handle cellA
+) {
+    if (cycle_facets.empty()) {
+        return true;
+    }
+    if (dt.is_infinite(cellA)) {
+        return true;
+    }
+
+    const auto itA = star.local_by_cell_idx.find(cellA->info().index);
+    if (itA == star.local_by_cell_idx.end()) {
+        return true;
+    }
+
+    std::vector<char> visited(star.cells.size(), 0);
+
+    std::vector<Cell_handle> stackB;
+    stackB.reserve(cycle_facets.size() * 2);
+
+    // Initialize barrier: mark the mirror-side cells as visited, seed with cycle-side cells.
+    for (const Facet& f0 : cycle_facets) {
+        if (dt.is_infinite(f0.first)) {
+            continue;
+        }
+        const auto it0 = star.local_by_cell_idx.find(f0.first->info().index);
+        if (it0 != star.local_by_cell_idx.end()) {
+            stackB.push_back(f0.first);
+        }
+
+        const Facet f1 = dt.mirror_facet(f0);
+        if (!dt.is_infinite(f1.first)) {
+            const auto it1 = star.local_by_cell_idx.find(f1.first->info().index);
+            if (it1 != star.local_by_cell_idx.end()) {
+                visited[static_cast<size_t>(it1->second)] = 1;
+            }
+        }
+    }
+
+    while (!stackB.empty()) {
+        Cell_handle cellB = stackB.back();
+        stackB.pop_back();
+
+        if (cellB == cellA) {
+            return false;
+        }
+
+        const auto itB = star.local_by_cell_idx.find(cellB->info().index);
+        if (itB == star.local_by_cell_idx.end()) {
+            continue;
+        }
+        const int localB = itB->second;
+        if (visited[static_cast<size_t>(localB)]) {
+            continue;
+        }
+        visited[static_cast<size_t>(localB)] = 1;
+
+        // Traverse only within the star of v0: cross facets that contain v0.
+        for (int fi = 0; fi < 4; ++fi) {
+            if (cellB->vertex(fi) == v0) {
+                continue; // facet fi does NOT contain v0
+            }
+            Cell_handle nb = cellB->neighbor(fi);
+            if (dt.is_infinite(nb)) {
+                continue;
+            }
+            const auto itNB = star.local_by_cell_idx.find(nb->info().index);
+            if (itNB == star.local_by_cell_idx.end()) {
+                continue;
+            }
+            if (nb == cellA) {
+                return false;
+            }
+            const int localNB = itNB->second;
+            if (!visited[static_cast<size_t>(localNB)]) {
+                stackB.push_back(nb);
+            }
+        }
+    }
+
+    return true;
+}
+
+static bool does_starA_separate_cycles(
+    const Delaunay& dt,
+    const StarCellSetPositionMultiIsov& star,
+    Vertex_handle v0,
+    const std::vector<Facet>& cycleA_facets,
+    const std::vector<Facet>& cycleB_facets,
+    const Point& vposB
+) {
+    if (cycleA_facets.empty() || cycleB_facets.empty()) {
+        return true;
+    }
+
+    Cell_handle cellA = cycleA_facets.front().first;
+    if (dt.is_infinite(cellA)) {
+        return true;
+    }
+
+    const bool flag_separateA = are_cycle_cells_separated_from_cellA(dt, star, v0, cycleB_facets, cellA);
+
+    for (Facet fB : cycleB_facets) {
+        if (!flag_separateA) {
+            fB = dt.mirror_facet(fB);
+        }
+        Cell_handle cellB = fB.first;
+        if (dt.is_infinite(cellB)) {
+            continue;
+        }
+
+        const int facet_index = fB.second;
+        if (facet_index < 0 || facet_index >= 4) {
+            continue;
+        }
+
+        Vertex_handle vB = cellB->vertex(facet_index);
+
+        const CGAL::Orientation ori_cell = cell_orientation(cellB);
+        if (ori_cell == CGAL::COPLANAR) {
+            return false;
+        }
+
+        const CGAL::Orientation target = opposite_orientation(ori_cell);
+        const CGAL::Orientation ori_new = orientation_with_replaced_delv(cellB, vB, vposB);
+
+        if (ori_new != target) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool is_cycle_in_positive_half_space(
+    const Point& p,
+    const Vector3& normal,
+    const std::vector<Vertex_handle>& cycle_vertices
+) {
+    constexpr double eps = 1e-12;
+    for (Vertex_handle vh : cycle_vertices) {
+        const Vector3 u(p, vh->point());
+        if (vec_dot(u, normal) <= eps) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool is_cycle_in_negative_half_space(
+    const Point& p,
+    const Vector3& normal,
+    const std::vector<Vertex_handle>& cycle_vertices
+) {
+    return is_cycle_in_positive_half_space(p, -normal, cycle_vertices);
+}
+
+static bool does_bisecting_plane_separate_cycles(
+    const CycleDataPositionMultiIsov& cycleA,
+    const CycleDataPositionMultiIsov& cycleB,
+    const Point& vposA,
+    const Point& vposB
+) {
+    const Vector3 normal_raw(vposB, vposA);
+    const double len = vec_norm(normal_raw);
+    if (len < 1e-12) {
+        return false;
+    }
+
+    const Vector3 normalA = normal_raw / len;
+    const Point posC(
+        0.5 * (vposA.x() + vposB.x()),
+        0.5 * (vposA.y() + vposB.y()),
+        0.5 * (vposA.z() + vposB.z()));
+
+    if (!is_cycle_in_positive_half_space(posC, normalA, cycleA.boundary_verts)) {
+        return false;
+    }
+    if (!is_cycle_in_negative_half_space(posC, normalA, cycleB.boundary_verts)) {
+        return false;
+    }
+
+    return true;
+}
+
+static Point reflect_through_center(const Point& center, const Point& p) {
+    return Point(
+        2.0 * center.x() - p.x(),
+        2.0 * center.y() - p.y(),
+        2.0 * center.z() - p.z());
+}
+
+static bool find_vertex_positions_separating_cycles(
+    const Delaunay& dt,
+    const StarCellSetPositionMultiIsov& star,
+    Vertex_handle v0,
+    const CycleDataPositionMultiIsov& cycleA,
+    const CycleDataPositionMultiIsov& cycleB,
+    const Point& vposA,
+    const Point& vposB,
+    Point& new_vposA,
+    Point& new_vposB
+) {
+    new_vposA = vposA;
+    new_vposB = vposB;
+
+    if (does_bisecting_plane_separate_cycles(cycleA, cycleB, vposA, vposB)) {
+        return true;
+    }
+
+    const Point center = v0->point();
+    const Point vposB2 = reflect_through_center(center, vposA);
+    if (does_starA_separate_cycles(dt, star, v0, cycleA.facets, cycleB.facets, vposB2)) {
+        new_vposB = vposB2;
+        return true;
+    }
+
+    const Point vposA2 = reflect_through_center(center, vposB);
+    if (does_starA_separate_cycles(dt, star, v0, cycleB.facets, cycleA.facets, vposA2)) {
+        new_vposA = vposA2;
+        return true;
+    }
+
+    return false;
+}
+
 static uint32_t xorshift32(uint32_t& state) {
     state ^= state << 13;
     state ^= state >> 17;
@@ -1002,7 +1390,7 @@ static Vector3 rotate_axis_angle(const Vector3& vec, const Vector3& axis_unit, d
 struct IsovertexCandidateEvaluator {
     Vertex_handle v;
     const Delaunay& dt;
-    const std::unordered_map<int, Cell_handle>& cell_map;
+    const std::vector<Cell_handle>& cell_by_index;
     const std::vector<Point>& original_positions;
     double min_sep2 = 0.0;
 
@@ -1020,7 +1408,7 @@ struct IsovertexCandidateEvaluator {
         if (!have_min_separation(candidate, min_sep2)) {
             return false;
         }
-        if (check_self_intersection(v, candidate, dt, cell_map)) {
+        if (check_self_intersection(v, candidate, dt, cell_by_index)) {
             return false;
         }
 
@@ -1080,6 +1468,23 @@ static void add_two_cycle_diametric_opposite_candidates(
             2.0 * center.y() - p.y(),
             2.0 * center.z() - p.z());
     };
+
+    // First try reflecting the current positions 
+    if (evaluator.original_positions.size() == 2) {
+        std::vector<Point> cand = evaluator.original_positions;
+        cand[1] = diametric_opposite(evaluator.original_positions[0]);
+        evaluator.accept_if_better(
+            cand,
+            ResolutionStatus::RESOLVED_FALLBACK,
+            ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
+
+        cand = evaluator.original_positions;
+        cand[0] = diametric_opposite(evaluator.original_positions[1]);
+        evaluator.accept_if_better(
+            cand,
+            ResolutionStatus::RESOLVED_FALLBACK,
+            ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
+    }
 
     const double radius_scales[] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0};
     for (double scale : radius_scales) {
@@ -1197,7 +1602,7 @@ static void add_fibonacci_fallback_candidates(
  * @param dt The Delaunay triangulation
  * @param grid The volumetric grid
  * @param isovalue The isovalue for centroid computation
- * @param cell_map Map from cell indices to cell handles
+ * @param cell_by_index Cell handles indexed by `cell->info().index`
  * @return Resolution status indicating what happened
  */
 ResolutionResult resolve_self_intersection(
@@ -1206,9 +1611,9 @@ ResolutionResult resolve_self_intersection(
     const Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map
+    const std::vector<Cell_handle>& cell_by_index
 ) {
-    if (!check_self_intersection(v, cycle_isovertices, dt, cell_map)) {
+    if (!check_self_intersection(v, cycle_isovertices, dt, cell_by_index)) {
         return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
     }
 
@@ -1227,7 +1632,7 @@ ResolutionResult resolve_self_intersection(
     std::vector<Point> centroids(n);
     for (int c = 0; c < n; ++c) {
         centroids[c] = compute_centroid_of_voronoi_edge_and_isosurface(
-            dt, grid, isovalue, v, cycles[c], cell_map);
+            dt, grid, isovalue, v, cycles[c], cell_by_index);
     }
 
     std::vector<Vector3> centroid_dirs(n);
@@ -1238,40 +1643,7 @@ ResolutionResult resolve_self_intersection(
     const double min_sep = std::max(1e-8, base_radius * 1e-3);
     const double min_sep2 = min_sep * min_sep;
 
-    // Two-cycle special case 
-    // keep one isovertex on the current sphere and place the other diametrically opposite.
-    if (n == 2) {
-        auto diametric_opposite = [&](const Point& p) -> Point {
-            return Point(
-                2.0 * center.x() - p.x(),
-                2.0 * center.y() - p.y(),
-                2.0 * center.z() - p.z());
-        };
-
-        // vposB2 = 2*(v0 - vposA) + vposA = 2*v0 - vposA
-        {
-            std::vector<Point> candidate = original_positions;
-            candidate[1] = diametric_opposite(original_positions[0]);
-            if (have_min_separation(candidate, min_sep2) &&
-                !check_self_intersection(v, candidate, dt, cell_map)) {
-                cycle_isovertices = candidate;
-                return {ResolutionStatus::RESOLVED_FALLBACK, ResolutionStrategy::TWO_CYCLE_DIAMETRIC};
-            }
-        }
-
-        // vposA2 = 2*(v0 - vposB) + vposB = 2*v0 - vposB
-        {
-            std::vector<Point> candidate = original_positions;
-            candidate[0] = diametric_opposite(original_positions[1]);
-            if (have_min_separation(candidate, min_sep2) &&
-                !check_self_intersection(v, candidate, dt, cell_map)) {
-                cycle_isovertices = candidate;
-                return {ResolutionStatus::RESOLVED_FALLBACK, ResolutionStrategy::TWO_CYCLE_DIAMETRIC};
-            }
-        }
-    }
-
-    IsovertexCandidateEvaluator evaluator{v, dt, cell_map, original_positions, min_sep2};
+    IsovertexCandidateEvaluator evaluator{v, dt, cell_by_index, original_positions, min_sep2};
 
     add_centroid_projection_candidates(center, base_radius, centroids, evaluator);
 
@@ -1313,6 +1685,96 @@ ResolutionResult resolve_self_intersection(
     }
 
     return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::NONE};
+}
+
+// ============================================================================
+// Multi-cycle resolution
+// ============================================================================
+
+static ResolutionResult resolve_multi_cycle_position_multi_isov(
+    Vertex_handle v,
+    std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt,
+    const UnifiedGrid& grid,
+    float isovalue,
+    const std::vector<Cell_handle>& cell_by_index
+) {
+    const auto& cycles = v->info().facet_cycles;
+    const int num_cycles = static_cast<int>(cycles.size());
+    if (num_cycles < 2 || static_cast<int>(cycle_isovertices.size()) < 2) {
+        return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
+    }
+
+    // attempt when a local self-intersection is present.
+    // otherwise will risk perturbing the mesh and introducing global self-intersections.
+    const std::vector<Point> original_positions = cycle_isovertices;
+    if (!check_self_intersection(v, original_positions, dt, cell_by_index)) {
+        return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
+    }
+
+    std::vector<CycleDataPositionMultiIsov> cycle_data;
+    cycle_data.reserve(static_cast<size_t>(num_cycles));
+    for (int c = 0; c < num_cycles; ++c) {
+        cycle_data.push_back(build_cycle_data_position_multi_isov(dt, cell_by_index, v, cycles[c]));
+    }
+
+    const StarCellSetPositionMultiIsov star = build_star_cell_set_position_multi_isov(dt, v);
+
+    bool any_changed = false;
+    const double change_eps2 = 1e-24;
+    const int MAX_PAIRWISE_PASSES = 4;
+
+    for (int pass = 0; pass < MAX_PAIRWISE_PASSES; ++pass) {
+        bool pass_changed = false;
+
+        for (int a = 0; a < num_cycles; ++a) {
+            for (int b = a + 1; b < num_cycles; ++b) {
+                Point newA = cycle_isovertices[static_cast<size_t>(a)];
+                Point newB = cycle_isovertices[static_cast<size_t>(b)];
+
+                if (!find_vertex_positions_separating_cycles(
+                        dt,
+                        star,
+                        v,
+                        cycle_data[static_cast<size_t>(a)],
+                        cycle_data[static_cast<size_t>(b)],
+                        cycle_isovertices[static_cast<size_t>(a)],
+                        cycle_isovertices[static_cast<size_t>(b)],
+                        newA,
+                        newB)) {
+                    continue;
+                }
+
+                if (squared_distance(newA, cycle_isovertices[static_cast<size_t>(a)]) > change_eps2) {
+                    cycle_isovertices[static_cast<size_t>(a)] = newA;
+                    pass_changed = true;
+                }
+                if (squared_distance(newB, cycle_isovertices[static_cast<size_t>(b)]) > change_eps2) {
+                    cycle_isovertices[static_cast<size_t>(b)] = newB;
+                    pass_changed = true;
+                }
+            }
+        }
+
+        if (pass_changed) {
+            any_changed = true;
+        } else {
+            break;
+        }
+    }
+
+    // Validation: accept if this resolves all local self-intersections.
+    if (!check_self_intersection(v, cycle_isovertices, dt, cell_by_index)) {
+        if (!any_changed) {
+            return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
+        }
+        return {ResolutionStatus::RESOLVED_FALLBACK, ResolutionStrategy::TWO_CYCLE_DIAMETRIC};
+    }
+
+    // Fallback: retain the previous heuristic resolver when PositionMultiIsov
+    // separation tests are insufficient (e.g., >2 cycles or degenerate cases).
+    cycle_isovertices = original_positions;
+    return resolve_self_intersection(v, cycle_isovertices, dt, grid, isovalue, cell_by_index);
 }
 
 // ============================================================================
@@ -1401,7 +1863,7 @@ std::vector<Vertex_handle> compute_initial_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map,
+    const std::vector<Cell_handle>& cell_by_index,
     IsovertexComputationStats& stats
 ) {
     std::vector<Vertex_handle> multi_cycle_vertices;
@@ -1444,7 +1906,7 @@ std::vector<Vertex_handle> compute_initial_cycle_isovertices(
             const double sphere_radius = compute_sphere_radius(vit, dt, grid);
             for (size_t c = 0; c < cycles.size(); ++c) {
                 Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
-                    dt, grid, isovalue, vit, cycles[c], cell_map);
+                    dt, grid, isovalue, vit, cycles[c], cell_by_index);
 
                 isovertices[c] = project_to_sphere(centroid, cube_center, sphere_radius);
             }
@@ -1464,7 +1926,7 @@ std::vector<Vertex_handle> resolve_multi_cycle_self_intersections(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map,
+    const std::vector<Cell_handle>& cell_by_index,
     const std::vector<Vertex_handle>& multi_cycle_vertices,
     IsovertexComputationStats& stats
 ) {
@@ -1490,9 +1952,10 @@ std::vector<Vertex_handle> resolve_multi_cycle_self_intersections(
 
             auto& isovertices = vh->info().cycle_isovertices;
 
-            // Attempt to resolve self-intersection using multiple strategies.
-            const ResolutionResult result = resolve_self_intersection(
-                vh, isovertices, dt, grid, isovalue, cell_map);
+            // First try the PositionMultiIsov orientation/half-space separation logic.
+            // Fall back to the legacy intersection-based resolver only if needed.
+            const ResolutionResult result = resolve_multi_cycle_position_multi_isov(
+                vh, isovertices, dt, grid, isovalue, cell_by_index);
 
             update_resolution_stats(result, stats, any_changed,
                 pass_detected, pass_resolved, pass_fallback, pass_unresolved);
@@ -1538,29 +2001,57 @@ void resolve_single_cycle_self_intersections(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map,
-    const std::vector<Vertex_handle>& modified_multi_cycle_vertices,
+    const std::vector<Cell_handle>& cell_by_index,
+    const std::vector<Vertex_handle>& seed_vertices,
     IsovertexComputationStats& stats
 ) {
-    // Skip if no multi-cycle vertices were modified.
-    if (modified_multi_cycle_vertices.empty()) {
+    const int max_hops = 2;  // Hard-coded hop radius for single-cycle cleanup
+    if (seed_vertices.empty()) {
         return;
     }
 
     std::vector<Vertex_handle> single_cycle_candidates;
-    std::unordered_set<int> single_cycle_candidate_indices;
+    std::vector<uint8_t> is_candidate(static_cast<size_t>(dt.number_of_vertices() + 1), 0);
+    std::vector<uint8_t> visited(static_cast<size_t>(dt.number_of_vertices() + 1), 0);
+    std::vector<Edge> incident_edges;
+    incident_edges.reserve(32);
+
+    auto ensure_index_capacity = [&](int idx) {
+        if (idx < 0) {
+            return;
+        }
+        const size_t needed = static_cast<size_t>(idx) + 1;
+        if (needed > visited.size()) {
+            visited.resize(needed, 0);
+            is_candidate.resize(needed, 0);
+        }
+    };
 
     // Lambda to gather single-cycle vertices within a certain hop distance.
     auto add_single_cycle_candidates_within_hops = [&](
         const std::vector<Vertex_handle>& seeds,
         int max_hops
     ) {
-        std::unordered_set<int> visited_indices;
-        visited_indices.reserve(seeds.size() * 8);
+        std::fill(visited.begin(), visited.end(), 0);
 
-        std::vector<Vertex_handle> frontier = seeds;
-        for (Vertex_handle vh : frontier) {
-            visited_indices.insert(vh->info().index);
+        std::vector<Vertex_handle> frontier;
+        frontier.reserve(seeds.size());
+        for (Vertex_handle vh : seeds) {
+            if (vh == Vertex_handle()) {
+                continue;
+            }
+            if (!vh->info().active || vh->info().is_dummy) {
+                continue;
+            }
+            const int seed_idx = vh->info().index;
+            if (seed_idx < 0) {
+                continue;
+            }
+            ensure_index_capacity(seed_idx);
+            if (visited[static_cast<size_t>(seed_idx)] == 0) {
+                visited[static_cast<size_t>(seed_idx)] = 1;
+                frontier.push_back(vh);
+            }
         }
 
         for (int depth = 0; depth < max_hops; ++depth) {
@@ -1568,7 +2059,7 @@ void resolve_single_cycle_self_intersections(
             next_frontier.reserve(frontier.size() * 4);
 
             for (Vertex_handle src : frontier) {
-                std::vector<Edge> incident_edges;
+                incident_edges.clear();
                 dt.incident_edges(src, std::back_inserter(incident_edges));
 
                 for (const Edge& e : incident_edges) {
@@ -1581,13 +2072,21 @@ void resolve_single_cycle_self_intersections(
                     if (!other->info().active) continue;
 
                     const int other_idx = other->info().index;
-                    if (visited_indices.insert(other_idx).second) {
+                    if (other_idx < 0) {
+                        continue;
+                    }
+                    ensure_index_capacity(other_idx);
+                    if (visited[static_cast<size_t>(other_idx)] == 0) {
+                        visited[static_cast<size_t>(other_idx)] = 1;
                         next_frontier.push_back(other);
                     }
 
                     // Collect single-cycle candidates.
-                    if (other->info().facet_cycles.size() == 1) {
-                        if (single_cycle_candidate_indices.insert(other_idx).second) {
+                    if (other->info().facet_cycles.size() == 1 &&
+                        other->info().facet_cycles[0].size() >= 4) {
+                        if (static_cast<size_t>(other_idx) < is_candidate.size() &&
+                            is_candidate[static_cast<size_t>(other_idx)] == 0) {
+                            is_candidate[static_cast<size_t>(other_idx)] = 1;
                             single_cycle_candidates.push_back(other);
                         }
                     }
@@ -1601,8 +2100,8 @@ void resolve_single_cycle_self_intersections(
         }
     };
 
-    // Targeted cleanup: check single-cycle vertices within 2 hops of modified multi-cycle vertices.
-    add_single_cycle_candidates_within_hops(modified_multi_cycle_vertices, /*max_hops=*/2);
+    // Targeted cleanup: check single-cycle vertices within a small hop radius of seed vertices.
+    add_single_cycle_candidates_within_hops(seed_vertices, max_hops);
 
     const int MAX_SINGLE_CYCLE_PASSES = 2;
     const int MAX_EXPANSION_ROUNDS = 2;
@@ -1627,7 +2126,7 @@ void resolve_single_cycle_self_intersections(
 
                 auto& isovertices = vh->info().cycle_isovertices;
                 const ResolutionResult result = resolve_self_intersection(
-                    vh, isovertices, dt, grid, isovalue, cell_map);
+                    vh, isovertices, dt, grid, isovalue, cell_by_index);
 
                 update_resolution_stats(result, stats, any_changed,
                     pass_detected, pass_resolved, pass_fallback, pass_unresolved);
@@ -1660,71 +2159,13 @@ void resolve_single_cycle_self_intersections(
 
         // Expand the candidate region around unresolved single-cycle vertices.
         const size_t before = single_cycle_candidates.size();
-        add_single_cycle_candidates_within_hops(unresolved_vertices, /*max_hops=*/2);
+        add_single_cycle_candidates_within_hops(unresolved_vertices, max_hops);
         if (single_cycle_candidates.size() == before) {
             break;
         }
     }
 }
 
-// ============================================================================
-// Sub-routine: Global fallback for single-cycle vertices (Pass 4)
-// ============================================================================
-
-void resolve_global_single_cycle_fallback(
-    Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map,
-    IsovertexComputationStats& stats
-) {
-    // Small-mesh fallback: if unresolved cases remain and mesh is small enough,
-    // run a global pass over all single-cycle vertices.
-    const int MAX_GLOBAL_SINGLE_CYCLE_VERTICES = 20000;
-    
-    if (!stats.had_unresolved || stats.single_cycle_count > MAX_GLOBAL_SINGLE_CYCLE_VERTICES) {
-        return;
-    }
-
-    const int MAX_GLOBAL_SINGLE_CYCLE_PASSES = 2;
-    
-    for (int pass = 0; pass < MAX_GLOBAL_SINGLE_CYCLE_PASSES; ++pass) {
-        bool any_changed = false;
-        int pass_detected = 0;
-        int pass_resolved = 0;
-        int pass_fallback = 0;
-        int pass_unresolved = 0;
-
-        for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
-            if (!vit->info().active) continue;
-            if (vit->info().is_dummy) continue;
-            if (vit->info().facet_cycles.size() != 1) continue;
-
-            auto& isovertices = vit->info().cycle_isovertices;
-            const ResolutionResult result = resolve_self_intersection(
-                vit, isovertices, dt, grid, isovalue, cell_map);
-
-            update_resolution_stats(result, stats, any_changed,
-                pass_detected, pass_resolved, pass_fallback, pass_unresolved);
-        }
-
-        stats.self_intersection_detected += pass_detected;
-        stats.self_intersection_resolved += pass_resolved;
-        stats.self_intersection_fallback += pass_fallback;
-
-        if (pass_detected > 0) {
-            DEBUG_PRINT("[DEL-SELFI] global single-cycle pass " << (pass + 1) << "/" << MAX_GLOBAL_SINGLE_CYCLE_PASSES
-                        << ": detected=" << pass_detected
-                        << ", resolved=" << pass_resolved
-                        << ", fallback=" << pass_fallback
-                        << ", unresolved=" << pass_unresolved);
-        }
-
-        if (!any_changed) {
-            break;
-        }
-    }
-}
 
 // ============================================================================
 // Sub-routine: Report isovertex computation statistics
@@ -1769,7 +2210,7 @@ void report_isovertex_statistics(const IsovertexComputationStats& stats) {
  * @brief Compute isovertex positions for all cycles around active Delaunay vertices.
  *
  * This is the main entry point for Step 9 of the Delaunay-based VDC algorithm.
- * The computation proceeds in four passes:
+ * The computation proceeds in three passes:
  *
  *   Pass 1 (compute_initial_cycle_isovertices):
  *     Compute initial positions for all active vertices.
@@ -1781,11 +2222,8 @@ void report_isovertex_statistics(const IsovertexComputationStats& stats) {
  *     Uses multiple strategies: centroid projection, diametric placement, Fibonacci fallback.
  *
  *   Pass 3 (resolve_single_cycle_self_intersections):
- *     Targeted cleanup of single-cycle vertices near modified multi-cycle vertices.
- *     Only checks vertices within 2 hops to limit overhead.
- *
- *   Pass 4 (resolve_global_single_cycle_fallback):
- *     For small meshes with unresolved cases, run a global check on all single-cycle vertices.
+ *     Targeted cleanup of single-cycle vertices near modified vertices.
+ *     Checks vertices within 2 hops of modified multi-cycle vertices.
  *
  * @param dt The Delaunay triangulation with cycles computed.
  * @param grid The scalar field grid.
@@ -1803,8 +2241,8 @@ void compute_cycle_isovertices(
     // Suppress unused parameter warning - the choice is encoded in vertex info.
     (void)position_on_isov;
 
-    // Build cell lookup map once for efficient cell access by index.
-    std::unordered_map<int, Cell_handle> cell_map = build_cell_index_map(dt);
+    // Build a direct lookup table for efficient cell access by index.
+    const std::vector<Cell_handle> cell_by_index = build_cell_index_vector(dt);
 
     // Initialize statistics tracking.
     IsovertexComputationStats stats;
@@ -1813,24 +2251,21 @@ void compute_cycle_isovertices(
     // Pass 1: Compute initial isovertex positions for all active vertices.
     // ========================================================================
     std::vector<Vertex_handle> multi_cycle_vertices = compute_initial_cycle_isovertices(
-        dt, grid, isovalue, cell_map, stats);
+        dt, grid, isovalue, cell_by_index, stats);
 
     // ========================================================================
     // Pass 2: Resolve self-intersections on multi-cycle vertices.
     // ========================================================================
     std::vector<Vertex_handle> modified_vertices = resolve_multi_cycle_self_intersections(
-        dt, grid, isovalue, cell_map, multi_cycle_vertices, stats);
+        dt, grid, isovalue, cell_by_index, multi_cycle_vertices, stats);
 
     // ========================================================================
     // Pass 3: Targeted cleanup of single-cycle vertices near modified vertices.
     // ========================================================================
     resolve_single_cycle_self_intersections(
-        dt, grid, isovalue, cell_map, modified_vertices, stats);
+        dt, grid, isovalue, cell_by_index, modified_vertices, stats);
 
-    // ========================================================================
-    // Pass 4: Global fallback for small meshes with unresolved cases.
-    // ========================================================================
-    resolve_global_single_cycle_fallback(dt, grid, isovalue, cell_map, stats);
+
 
     // ========================================================================
     // Report final statistics.
@@ -1847,6 +2282,12 @@ int find_cycle_containing_facet(
     int facet_index
 ) {
     const auto& cycles = v_handle->info().facet_cycles;
+
+    // Fast path: single-cycle vertices only have one cycle, so every incident
+    // isosurface facet must belong to cycle 0.
+    if (cycles.size() == 1) {
+        return 0;
+    }
 
     for (size_t c = 0; c < cycles.size(); ++c) {
         for (const auto& [ci, fi] : cycles[c]) {
@@ -2035,15 +2476,6 @@ static void recompute_cycles_for_vertex(
             }
         }
 
-        if (!applied_matching) {
-            // Clique fallback
-            for (size_t i = 0; i < facet_ids.size(); ++i) {
-                for (size_t j = i + 1; j < facet_ids.size(); ++j) {
-                    adj[facet_ids[i]].push_back(facet_ids[j]);
-                    adj[facet_ids[j]].push_back(facet_ids[i]);
-                }
-            }
-        }
     }
 
     // Extract connected components as cycles
@@ -2071,6 +2503,7 @@ static void recompute_cycles_for_vertex(
     }
 
     v_handle->info().facet_cycles = cycles;
+    write_facet_cycle_indices_for_vertex(v_handle, cell_by_index);
 }
 
 ModifyCyclesResult modify_cycles_pass(Delaunay& dt) {
@@ -2143,14 +2576,31 @@ ModifyCyclesResult modify_cycles_pass(Delaunay& dt) {
             seen_cycle_pairs.reserve(pairs.size());
 
             for (const auto& [k0, k1] : pairs) {
-                int c0 = find_cycle_containing_facet(v0, k0.cell_index, k0.facet_index);
-                if (c0 < 0) {
-                    c0 = find_cycle_containing_facet(v0, k1.cell_index, k1.facet_index);
-                }
+                auto cycle_index_for_vertex_on_facet = [&](Vertex_handle vh, const FacetKey& fk) -> int {
+                    Cell_handle cell = lookup_cell(cell_by_index, fk.cell_index);
+                    if (cell == Cell_handle()) {
+                        return -1;
+                    }
+                    if (fk.facet_index < 0 || fk.facet_index >= 4) {
+                        return -1;
+                    }
+                    const int v_local = find_vertex_index_in_cell(cell, vh);
+                    if (v_local < 0 || v_local >= 4) {
+                        return -1;
+                    }
+                    const int anchor = (fk.facet_index + 1) % 4;
+                    const int slot = (v_local - anchor + 4) % 4;
+                    if (slot < 0 || slot >= 3) {
+                        return -1;
+                    }
+                    return cell->info().facet_info[fk.facet_index].dualCellEdgeIndex[slot];
+                };
 
-                int c1 = find_cycle_containing_facet(v1, k0.cell_index, k0.facet_index);
-                if (c1 < 0) {
-                    c1 = find_cycle_containing_facet(v1, k1.cell_index, k1.facet_index);
+                int c0 = cycle_index_for_vertex_on_facet(v0, k0);
+                int c1 = cycle_index_for_vertex_on_facet(v1, k0);
+                if (c0 < 0 || c1 < 0) {
+                    c0 = cycle_index_for_vertex_on_facet(v0, k1);
+                    c1 = cycle_index_for_vertex_on_facet(v1, k1);
                 }
 
                 if (c0 < 0 || c1 < 0) {
