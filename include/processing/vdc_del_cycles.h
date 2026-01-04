@@ -11,7 +11,6 @@
 
 #include "core/vdc_type.h"
 #include "processing/vdc_grid.h"
-#include <unordered_map>
 #include <vector>
 #include <cstdint>
 
@@ -170,6 +169,16 @@ struct EdgeMatchingState {
 // Statistics Tracking
 // ============================================================================
 
+struct CycleDataPositionMultiIsov {
+    std::vector<Facet> facets;                  // Delaunay facets incident on v0
+    std::vector<Vertex_handle> boundary_verts;  // Distinct vertices (excluding v0) on cycle boundary
+};
+
+struct StarCellSetPositionMultiIsov {
+    std::vector<Cell_handle> cells;                 // finite cells incident on v0
+    std::unordered_map<int, int> local_by_cell_idx; // cell->info().index -> local index in cells
+};
+
 /**
  * @brief Statistics collected during isovertex computation.
  *
@@ -216,14 +225,12 @@ void compute_facet_cycles(Delaunay& dt);
  * @param grid The scalar field grid.
  * @param isovalue The isovalue threshold.
  * @param position_on_isov If true, Delaunay sites are on isosurface samples.
- * @param force_global_single_cycle_pass If true, run a global single-cycle scan even without unresolved cases.
  */
 void compute_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    bool position_on_isov,
-    bool force_global_single_cycle_pass
+    bool position_on_isov
 );
 
 // ============================================================================
@@ -231,14 +238,15 @@ void compute_cycle_isovertices(
 // ============================================================================
 
 /**
- * @brief Build a mapping from cell indices to cell handles.
+ * @brief Build a direct lookup table from cell indices to cell handles.
  *
- * Creates a lookup table for efficient cell access by index.
+ * Cell indices are assigned densely in `construct_delaunay_triangulation()`,
+ * so a vector provides O(1) lookup without hashing overhead.
  *
  * @param dt The Delaunay triangulation.
- * @return Map from cell index to Cell_handle.
+ * @return Vector indexed by `cell->info().index`.
  */
-std::unordered_map<int, Cell_handle> build_cell_index_map(const Delaunay& dt);
+std::vector<Cell_handle> build_cell_index_vector(const Delaunay& dt);
 
 /**
  * @brief Check if cycle isovertex positions create self-intersecting triangles.
@@ -249,14 +257,14 @@ std::unordered_map<int, Cell_handle> build_cell_index_map(const Delaunay& dt);
  * @param v Handle to the Delaunay vertex with multiple cycles.
  * @param cycle_isovertices Proposed isovertex positions for each cycle.
  * @param dt The Delaunay triangulation.
- * @param cell_map Precomputed map from cell indices to handles.
+ * @param cell_by_index Cell handles indexed by `cell->info().index`.
  * @return true if any triangles from different cycles intersect.
  */
 bool check_self_intersection(
     Vertex_handle v,
     const std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    const std::unordered_map<int, Cell_handle>& cell_map
+    const std::vector<Cell_handle>& cell_by_index
 );
 
 /**
@@ -290,7 +298,7 @@ double compute_sphere_radius(
  * @param dt The Delaunay triangulation.
  * @param grid The volumetric grid.
  * @param isovalue The isovalue for centroid computation.
- * @param cell_map Precomputed map from cell indices to handles.
+ * @param cell_by_index Cell handles indexed by `cell->info().index`.
  * @return ResolutionResult indicating outcome and strategy used.
  */
 ResolutionResult resolve_self_intersection(
@@ -299,7 +307,7 @@ ResolutionResult resolve_self_intersection(
     const Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map
+    const std::vector<Cell_handle>& cell_by_index
 );
 
 // ============================================================================
@@ -316,7 +324,7 @@ ResolutionResult resolve_self_intersection(
  * @param dt The Delaunay triangulation with cycles computed.
  * @param grid The scalar field grid.
  * @param isovalue The isovalue threshold.
- * @param cell_map Precomputed map from cell indices to handles.
+ * @param cell_by_index Cell handles indexed by `cell->info().index`.
  * @param stats [out] Statistics to update.
  * @return Vector of multi-cycle vertex handles for further processing.
  */
@@ -324,7 +332,7 @@ std::vector<Vertex_handle> compute_initial_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map,
+    const std::vector<Cell_handle>& cell_by_index,
     IsovertexComputationStats& stats
 );
 
@@ -337,7 +345,7 @@ std::vector<Vertex_handle> compute_initial_cycle_isovertices(
  * @param dt The Delaunay triangulation.
  * @param grid The scalar field grid.
  * @param isovalue The isovalue threshold.
- * @param cell_map Precomputed map from cell indices to handles.
+ * @param cell_by_index Cell handles indexed by `cell->info().index`.
  * @param multi_cycle_vertices Vertices to process.
  * @param stats [in/out] Statistics to update.
  * @return Vector of modified vertex handles for cleanup passes.
@@ -346,7 +354,7 @@ std::vector<Vertex_handle> resolve_multi_cycle_self_intersections(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map,
+    const std::vector<Cell_handle>& cell_by_index,
     const std::vector<Vertex_handle>& multi_cycle_vertices,
     IsovertexComputationStats& stats
 );
@@ -354,13 +362,13 @@ std::vector<Vertex_handle> resolve_multi_cycle_self_intersections(
 /**
  * @brief Resolve self-intersections on single-cycle vertices near modified multi-cycle vertices.
  *
- * Pass 3 of the isovertex computation: targeted cleanup within 2 hops of
+ * Pass 3 of the isovertex computation: targeted cleanup within a small hop radius of
  * modified multi-cycle vertices.
  *
  * @param dt The Delaunay triangulation.
  * @param grid The scalar field grid.
  * @param isovalue The isovalue threshold.
- * @param cell_map Precomputed map from cell indices to handles.
+ * @param cell_by_index Cell handles indexed by `cell->info().index`.
  * @param modified_multi_cycle_vertices Vertices that were modified in Pass 2.
  * @param stats [in/out] Statistics to update.
  */
@@ -368,28 +376,8 @@ void resolve_single_cycle_self_intersections(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map,
+    const std::vector<Cell_handle>& cell_by_index,
     const std::vector<Vertex_handle>& modified_multi_cycle_vertices,
-    IsovertexComputationStats& stats
-);
-
-/**
- * @brief Global fallback pass for single-cycle vertices on small meshes.
- *
- * If unresolved cases remain and the mesh is small enough, runs a global
- * check over all single-cycle vertices.
- *
- * @param dt The Delaunay triangulation.
- * @param grid The scalar field grid.
- * @param isovalue The isovalue threshold.
- * @param cell_map Precomputed map from cell indices to handles.
- * @param stats [in/out] Statistics to update.
- */
-void resolve_global_single_cycle_fallback(
-    Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    const std::unordered_map<int, Cell_handle>& cell_map,
     IsovertexComputationStats& stats
 );
 
@@ -429,7 +417,7 @@ int find_cycle_containing_facet(
  * @param isovalue The isovalue threshold.
  * @param v_handle Handle to the Delaunay vertex.
  * @param cycle_facets List of (cell_index, facet_index) pairs in the cycle.
- * @param cell_map Precomputed map from cell indices to handles.
+ * @param cell_by_index Cell handles indexed by `cell->info().index`.
  * @return The centroid of all isosurface crossing points.
  */
 Point compute_centroid_of_voronoi_edge_and_isosurface(
@@ -438,7 +426,7 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
     float isovalue,
     Vertex_handle v_handle,
     const std::vector<std::pair<int, int>>& cycle_facets,
-    const std::unordered_map<int, Cell_handle>& cell_map
+    const std::vector<Cell_handle>& cell_by_index
 );
 
 /**
