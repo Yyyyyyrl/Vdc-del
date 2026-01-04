@@ -30,8 +30,8 @@ DATASETS=("fuel" "aneurysm" "engine" "bonsai" "silicium" "neghip" "lobster" "mar
 ISOVALUES=("70.5" "30.5" "100.5" "50.5" "120.5" "100.5" "20.5" "100.5" "45.5")
 
 # Configurations: output filename postfix and flags
-CONFIG_NAMES=("default" "sep2_dist2" "sep2_dist3" "sep3_dist4" "sup2_dist2" "sup2_dist3")
-CONFIG_FLAGS=("" "-sep_split 2 -sep_dist 2" "-sep_split 2 -sep_dist 3" "-sep_split 3 -sep_dist 4" "-supersample 2 -sep_dist 2" "-supersample 2 -sep_dist 3") 
+CONFIG_NAMES=("default" "sep2_dist2" "sep2_dist3" "sep3_dist4")
+CONFIG_FLAGS=("" "-sep_split 2 -sep_dist 2" "-sep_split 2 -sep_dist 3" "-sep_split 3 -sep_dist 4") 
 
 NUM_DATASETS=${#DATASETS[@]}
 NUM_CONFIGS=${#CONFIG_NAMES[@]}

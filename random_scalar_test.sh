@@ -39,8 +39,8 @@ BASE_SEED=""
 NUM_JOBS=""
 
 # Configurations: name and flags (same as vdc_test.sh)
-CONFIG_NAMES=("default" "sep2_dist2" "sep2_dist3" "sep3_dist4" "sep4_dist5" "sup2_dist2" "sup2_dist3" "sup3_dist3")
-CONFIG_FLAGS=("" "-sep_split 2 -sep_dist 2" "-sep_split 2 -sep_dist 3" "-sep_split 3 -sep_dist 4" "-sep_split 4 -sep_dist 5" "-supersample 2 -sep_dist 2" "-supersample 2 -sep_dist 3" "-supersample 3 -sep_dist 3") 
+CONFIG_NAMES=("default" "sep2_dist2" "sep2_dist3" "sep3_dist4" "sep4_dist5")
+CONFIG_FLAGS=("" "-sep_split 2 -sep_dist 2" "-sep_split 2 -sep_dist 3" "-sep_split 3 -sep_dist 4" "-sep_split 4 -sep_dist 5") 
 
 NUM_CONFIGS=${#CONFIG_NAMES[@]}
 
