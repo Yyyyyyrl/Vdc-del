@@ -14,8 +14,13 @@
 #include "processing/vdc_sep_isov.h"
 #include "vdc_io.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 //! @brief Print program header
 void print_header() {
@@ -157,10 +162,7 @@ int main(int argc, char* argv[]) {
         const int site_idx = vit->info().index;
         if (site_idx >= 0 && static_cast<size_t>(site_idx) < isoCrossings.size()) {
             vit->info().isov = isoCrossings[static_cast<size_t>(site_idx)];
-        } else {
-            // Fallback (should not happen): use the Delaunay site itself.
-            vit->info().isov = vit->point();
-        }
+        } 
     }
 
     TimingStats::getInstance().stopTimer("Delaunay", "Total");
@@ -216,7 +218,8 @@ int main(int argc, char* argv[]) {
     TimingStats::getInstance().startTimer("IsovertexComputation", "Total");
     std::cout << "Computing isovertex positions...\n";
 
-    compute_cycle_isovertices(dt, grid, param.isovalue, param.position_delv_on_isov);
+    compute_cycle_isovertices(
+        dt, grid, param.isovalue, param.position_delv_on_isov);
 
     TimingStats::getInstance().stopTimer("IsovertexComputation", "Total");
 
