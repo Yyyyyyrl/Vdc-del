@@ -139,6 +139,7 @@ enum class ResolutionStatus {
  */
 enum class ResolutionStrategy {
     NONE,                  ///< No strategy applied
+    POSITION_MULTI_ISOV,   ///< PositionMultiIsov separation tests
     TWO_CYCLE_DIAMETRIC,   ///< Two cycles placed diametrically opposite
     FIBONACCI_FALLBACK     ///< Fibonacci spherical distribution fallback
 };
@@ -168,16 +169,6 @@ struct EdgeMatchingState {
 // Statistics Tracking
 // ============================================================================
 
-struct CycleDataPositionMultiIsov {
-    std::vector<Facet> facets;                  // Delaunay facets incident on v0
-    std::vector<Vertex_handle> boundary_verts;  // Distinct vertices (excluding v0) on cycle boundary
-};
-
-struct StarCellSetPositionMultiIsov {
-    std::vector<Cell_handle> cells;                 // finite cells incident on v0
-    std::unordered_map<int, int> local_by_cell_idx; // cell->info().index -> local index in cells
-};
-
 /**
  * @brief Statistics collected during isovertex computation.
  *
@@ -194,6 +185,7 @@ struct IsovertexComputationStats {
     bool had_unresolved = false;             ///< Whether any case remained unresolved
 
     // Per-strategy counts
+    int64_t strat_position_multi_isov = 0;   ///< Uses of POSITION_MULTI_ISOV strategy
     int64_t strat_two_cycle_diametric = 0;   ///< Uses of TWO_CYCLE_DIAMETRIC strategy
     int64_t strat_fibonacci_fallback = 0;    ///< Uses of FIBONACCI_FALLBACK strategy
 };
@@ -232,161 +224,6 @@ void compute_cycle_isovertices(
 );
 
 // ============================================================================
-// Self-Intersection Detection and Resolution
-// ============================================================================
-
-/**
- * @brief Build a direct lookup table from cell indices to cell handles.
- *
- * Cell indices are assigned densely in `construct_delaunay_triangulation()`,
- * so a vector provides O(1) lookup without hashing overhead.
- *
- * @param dt The Delaunay triangulation.
- * @return Vector indexed by `cell->info().index`.
- */
-std::vector<Cell_handle> build_cell_index_vector(const Delaunay& dt);
-
-/**
- * @brief Check if cycle isovertex positions create self-intersecting triangles.
- *
- * For a multi-cycle vertex, checks if any triangles from different cycles
- * intersect each other using CGAL's do_intersect for Triangle_3 objects.
- *
- * @param v Handle to the Delaunay vertex with multiple cycles.
- * @param cycle_isovertices Proposed isovertex positions for each cycle.
- * @param dt The Delaunay triangulation.
- * @param cell_by_index Cell handles indexed by `cell->info().index`.
- * @return true if any triangles from different cycles intersect.
- */
-bool check_self_intersection(
-    Vertex_handle v,
-    const std::vector<Point>& cycle_isovertices,
-    const Delaunay& dt,
-    const std::vector<Cell_handle>& cell_by_index
-);
-
-/**
- * @brief Compute appropriate sphere radius for projecting cycle isovertices.
- *
- * Computes a sphere radius based on the minimum incident edge length
- * of the vertex, using a fraction (0.1) to keep isovertices close to
- * the Delaunay vertex while providing separation.
- *
- * @param v Handle to the Delaunay vertex.
- * @param dt The Delaunay triangulation.
- * @param grid The scalar field grid (used as fallback).
- * @return Sphere radius for projection.
- */
-double compute_sphere_radius(
-    Vertex_handle v,
-    const Delaunay& dt,
-    const UnifiedGrid& grid
-);
-
-/**
- * @brief Attempt to resolve self-intersection for a multi-cycle vertex.
- *
- * Tries multiple strategies to eliminate self-intersections between cycles:
- * 1. Two-cycle diametric opposition (for exactly 2 cycles)
- * 2. Centroid projection at various sphere radii
- * 3. Fibonacci sphere fallback for uniform distribution
- *
- * @param v Handle to the Delaunay vertex.
- * @param cycle_isovertices [in/out] Isovertex positions to adjust.
- * @param dt The Delaunay triangulation.
- * @param grid The volumetric grid.
- * @param isovalue The isovalue for centroid computation.
- * @param cell_by_index Cell handles indexed by `cell->info().index`.
- * @return ResolutionResult indicating outcome and strategy used.
- */
-ResolutionResult resolve_self_intersection(
-    Vertex_handle v,
-    std::vector<Point>& cycle_isovertices,
-    const Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    const std::vector<Cell_handle>& cell_by_index
-);
-
-// ============================================================================
-// Isovertex Computation Sub-routines
-// ============================================================================
-
-/**
- * @brief Compute initial isovertex positions for all active vertices.
- *
- * Pass 1 of the isovertex computation:
- * - Single-cycle vertices: use the isosurface sample point
- * - Multi-cycle vertices: compute centroids and project to sphere
- *
- * @param dt The Delaunay triangulation with cycles computed.
- * @param grid The scalar field grid.
- * @param isovalue The isovalue threshold.
- * @param cell_by_index Cell handles indexed by `cell->info().index`.
- * @param stats [out] Statistics to update.
- * @return Vector of multi-cycle vertex handles for further processing.
- */
-std::vector<Vertex_handle> compute_initial_cycle_isovertices(
-    Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    const std::vector<Cell_handle>& cell_by_index,
-    IsovertexComputationStats& stats
-);
-
-/**
- * @brief Resolve self-intersections on multi-cycle vertices.
- *
- * Pass 2 of the isovertex computation: iteratively resolves self-intersections
- * on multi-cycle vertices using the resolution strategies.
- *
- * @param dt The Delaunay triangulation.
- * @param grid The scalar field grid.
- * @param isovalue The isovalue threshold.
- * @param cell_by_index Cell handles indexed by `cell->info().index`.
- * @param multi_cycle_vertices Vertices to process.
- * @param stats [in/out] Statistics to update.
- * @return Vector of modified vertex handles for cleanup passes.
- */
-std::vector<Vertex_handle> resolve_multi_cycle_self_intersections(
-    Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    const std::vector<Cell_handle>& cell_by_index,
-    const std::vector<Vertex_handle>& multi_cycle_vertices,
-    IsovertexComputationStats& stats
-);
-
-/**
- * @brief Resolve self-intersections on single-cycle vertices near modified multi-cycle vertices.
- *
- * Pass 3 of the isovertex computation: targeted cleanup within a small hop radius of
- * modified multi-cycle vertices.
- *
- * @param dt The Delaunay triangulation.
- * @param grid The scalar field grid.
- * @param isovalue The isovalue threshold.
- * @param cell_by_index Cell handles indexed by `cell->info().index`.
- * @param modified_multi_cycle_vertices Vertices that were modified in Pass 2.
- * @param stats [in/out] Statistics to update.
- */
-void resolve_single_cycle_self_intersections(
-    Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    const std::vector<Cell_handle>& cell_by_index,
-    const std::vector<Vertex_handle>& modified_multi_cycle_vertices,
-    IsovertexComputationStats& stats
-);
-
-/**
- * @brief Report isovertex computation statistics to debug output.
- *
- * @param stats The statistics to report.
- */
-void report_isovertex_statistics(const IsovertexComputationStats& stats);
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -402,56 +239,6 @@ int find_cycle_containing_facet(
     Vertex_handle v_handle,
     int cell_index,
     int facet_index
-);
-
-/**
- * @brief Compute the centroid of Voronoi edge / isosurface intersections for a cycle.
- *
- * For each facet in the cycle, computes the isosurface crossing point via
- * linear interpolation between adjacent cell circumcenters.
- *
- * @param dt The Delaunay triangulation.
- * @param grid The scalar field grid.
- * @param isovalue The isovalue threshold.
- * @param v_handle Handle to the Delaunay vertex.
- * @param cycle_facets List of (cell_index, facet_index) pairs in the cycle.
- * @param cell_by_index Cell handles indexed by `cell->info().index`.
- * @return The centroid of all isosurface crossing points.
- */
-Point compute_centroid_of_voronoi_edge_and_isosurface(
-    const Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    Vertex_handle v_handle,
-    const std::vector<std::pair<int, int>>& cycle_facets,
-    const std::vector<Cell_handle>& cell_by_index
-);
-
-/**
- * @brief Project a point onto a sphere centered at a given point.
- *
- * @param point The point to project.
- * @param center The center of the sphere.
- * @param radius The radius of the sphere.
- * @return The projected point on the sphere surface.
- */
-Point project_to_sphere(const Point& point, const Point& center, double radius);
-
-/**
- * @brief Clip an isovertex to the circumscribed sphere of a cube.
- *
- * If the isovertex lies outside the circumscribed sphere centered at the
- * cube center, it is projected onto the sphere surface.
- *
- * @param isovertex The isosurface vertex to potentially clip.
- * @param cube_center The center of the active cube.
- * @param cube_side_length The side length of the active cube.
- * @return The clipped isovertex (same as input if already inside sphere).
- */
-Point clip_isovertex_to_circumscribed_sphere(
-    const Point& isovertex,
-    const Point& cube_center,
-    double cube_side_length
 );
 
 #endif // VDC_DEL_CYCLES_H
