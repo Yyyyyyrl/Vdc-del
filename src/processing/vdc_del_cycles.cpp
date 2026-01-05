@@ -801,6 +801,33 @@ static bool triangles_have_nontrivial_intersection(
     const Triangle_3& t1,
     const Triangle_3& t2
 ) {
+    auto segment_interior_intersects_triangle = [](
+        const Point& shared,
+        const Point& other,
+        const Triangle_3& tri
+    ) -> bool {
+        // Treat intersections at the shared endpoint as trivial by testing an open segment
+        // starting slightly away from `shared`.
+        constexpr double t = 1e-6;
+        const double dx = other.x() - shared.x();
+        const double dy = other.y() - shared.y();
+        const double dz = other.z() - shared.z();
+        const double len2 = dx * dx + dy * dy + dz * dz;
+        if (len2 < 1e-24) {
+            return false;
+        }
+
+        const Point nudged(
+            shared.x() + t * dx,
+            shared.y() + t * dy,
+            shared.z() + t * dz);
+        if (nudged == other) {
+            return false;
+        }
+
+        return CGAL::do_intersect(Segment3(nudged, other), tri);
+    };
+
     // Find shared vertices (by exact position, which is stable for shared mesh vertices).
     const std::array<Point, 3> t1v = {t1.vertex(0), t1.vertex(1), t1.vertex(2)};
     const std::array<Point, 3> t2v = {t2.vertex(0), t2.vertex(1), t2.vertex(2)};
@@ -863,6 +890,15 @@ static bool triangles_have_nontrivial_intersection(
         return true;
     }
     if (CGAL::do_intersect(t2_opposite, t1)) {
+        return true;
+    }
+
+    // Handle cases where the intersection segment touches the shared vertex and extends into
+    // the interior of the opposite triangle (a common "foldover" failure mode in a fan).
+    if (segment_interior_intersects_triangle(s, t1_other[0], t2) ||
+        segment_interior_intersects_triangle(s, t1_other[1], t2) ||
+        segment_interior_intersects_triangle(s, t2_other[0], t1) ||
+        segment_interior_intersects_triangle(s, t2_other[1], t1)) {
         return true;
     }
 
@@ -1025,6 +1061,16 @@ static bool have_min_separation(const std::vector<Point>& candidate, double min_
 //  Orientation/Half-space cycle separation
 // ============================================================================
 
+struct VertexStarCells {
+    std::vector<Cell_handle> cells;                 // finite cells incident on v0
+    std::unordered_map<int, int> local_by_cell_idx; // cell->info().index -> local index in cells
+};
+
+struct CycleBoundaryInfo {
+    std::vector<Facet> facets;                  // Delaunay facets incident on v0
+    std::vector<Vertex_handle> boundary_verts;  // Distinct vertices (excluding v0) on cycle boundary
+};
+
 static CGAL::Orientation opposite_orientation(const CGAL::Orientation o) {
     switch (o) {
         case CGAL::POSITIVE:
@@ -1058,11 +1104,11 @@ static CGAL::Orientation orientation_with_replaced_delv(
 }
 
 
-static StarCellSetPositionMultiIsov build_star_cell_set_position_multi_isov(
+static VertexStarCells gather_vertex_star_cells(
     const Delaunay& dt,
     Vertex_handle v0
 ) {
-    StarCellSetPositionMultiIsov out;
+    VertexStarCells out;
 
     std::vector<Cell_handle> incident_cells;
     dt.incident_cells(v0, std::back_inserter(incident_cells));
@@ -1086,13 +1132,13 @@ static StarCellSetPositionMultiIsov build_star_cell_set_position_multi_isov(
     return out;
 }
 
-static CycleDataPositionMultiIsov build_cycle_data_position_multi_isov(
+static CycleBoundaryInfo gather_cycle_boundary_info(
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
     Vertex_handle v0,
     const std::vector<std::pair<int, int>>& cycle_facets
 ) {
-    CycleDataPositionMultiIsov out;
+    CycleBoundaryInfo out;
     out.facets.reserve(cycle_facets.size());
 
     std::unordered_set<int> boundary_indices;
@@ -1135,23 +1181,23 @@ static CycleDataPositionMultiIsov build_cycle_data_position_multi_isov(
     return out;
 }
 
-static bool are_cycle_cells_separated_from_cellA(
+static bool is_star_cell_reachable_from_cycle_cells(
     const Delaunay& dt,
-    const StarCellSetPositionMultiIsov& star,
+    const VertexStarCells& star,
     Vertex_handle v0,
     const std::vector<Facet>& cycle_facets,
-    Cell_handle cellA
+    Cell_handle target
 ) {
     if (cycle_facets.empty()) {
-        return true;
+        return false;
     }
-    if (dt.is_infinite(cellA)) {
-        return true;
+    if (dt.is_infinite(target)) {
+        return false;
     }
 
-    const auto itA = star.local_by_cell_idx.find(cellA->info().index);
+    const auto itA = star.local_by_cell_idx.find(target->info().index);
     if (itA == star.local_by_cell_idx.end()) {
-        return true;
+        return false;
     }
 
     std::vector<char> visited(star.cells.size(), 0);
@@ -1182,8 +1228,8 @@ static bool are_cycle_cells_separated_from_cellA(
         Cell_handle cellB = stackB.back();
         stackB.pop_back();
 
-        if (cellB == cellA) {
-            return false;
+        if (cellB == target) {
+            return true;
         }
 
         const auto itB = star.local_by_cell_idx.find(cellB->info().index);
@@ -1209,8 +1255,8 @@ static bool are_cycle_cells_separated_from_cellA(
             if (itNB == star.local_by_cell_idx.end()) {
                 continue;
             }
-            if (nb == cellA) {
-                return false;
+            if (nb == target) {
+                return true;
             }
             const int localNB = itNB->second;
             if (!visited[static_cast<size_t>(localNB)]) {
@@ -1219,12 +1265,12 @@ static bool are_cycle_cells_separated_from_cellA(
         }
     }
 
-    return true;
+    return false;
 }
 
-static bool does_starA_separate_cycles(
+static bool passes_cycle_barrier_orientation_test(
     const Delaunay& dt,
-    const StarCellSetPositionMultiIsov& star,
+    const VertexStarCells& star,
     Vertex_handle v0,
     const std::vector<Facet>& cycleA_facets,
     const std::vector<Facet>& cycleB_facets,
@@ -1239,10 +1285,11 @@ static bool does_starA_separate_cycles(
         return true;
     }
 
-    const bool flag_separateA = are_cycle_cells_separated_from_cellA(dt, star, v0, cycleB_facets, cellA);
+    const bool cellA_reachable_from_cycleB =
+        is_star_cell_reachable_from_cycle_cells(dt, star, v0, cycleB_facets, cellA);
 
     for (Facet fB : cycleB_facets) {
-        if (!flag_separateA) {
+        if (cellA_reachable_from_cycleB) {
             fB = dt.mirror_facet(fB);
         }
         Cell_handle cellB = fB.first;
@@ -1296,9 +1343,9 @@ static bool is_cycle_in_negative_half_space(
     return is_cycle_in_positive_half_space(p, -normal, cycle_vertices);
 }
 
-static bool does_bisecting_plane_separate_cycles(
-    const CycleDataPositionMultiIsov& cycleA,
-    const CycleDataPositionMultiIsov& cycleB,
+static bool bisecting_plane_separates_cycle_boundaries(
+    const CycleBoundaryInfo& cycleA,
+    const CycleBoundaryInfo& cycleB,
     const Point& vposA,
     const Point& vposB
 ) {
@@ -1331,12 +1378,12 @@ static Point reflect_through_center(const Point& center, const Point& p) {
         2.0 * center.z() - p.z());
 }
 
-static bool find_vertex_positions_separating_cycles(
+static bool try_separate_cycle_pair_positions(
     const Delaunay& dt,
-    const StarCellSetPositionMultiIsov& star,
+    const VertexStarCells& star,
     Vertex_handle v0,
-    const CycleDataPositionMultiIsov& cycleA,
-    const CycleDataPositionMultiIsov& cycleB,
+    const CycleBoundaryInfo& cycleA,
+    const CycleBoundaryInfo& cycleB,
     const Point& vposA,
     const Point& vposB,
     Point& new_vposA,
@@ -1345,19 +1392,19 @@ static bool find_vertex_positions_separating_cycles(
     new_vposA = vposA;
     new_vposB = vposB;
 
-    if (does_bisecting_plane_separate_cycles(cycleA, cycleB, vposA, vposB)) {
+    if (bisecting_plane_separates_cycle_boundaries(cycleA, cycleB, vposA, vposB)) {
         return true;
     }
 
     const Point center = v0->point();
     const Point vposB2 = reflect_through_center(center, vposA);
-    if (does_starA_separate_cycles(dt, star, v0, cycleA.facets, cycleB.facets, vposB2)) {
+    if (passes_cycle_barrier_orientation_test(dt, star, v0, cycleA.facets, cycleB.facets, vposB2)) {
         new_vposB = vposB2;
         return true;
     }
 
     const Point vposA2 = reflect_through_center(center, vposB);
-    if (does_starA_separate_cycles(dt, star, v0, cycleB.facets, cycleA.facets, vposA2)) {
+    if (passes_cycle_barrier_orientation_test(dt, star, v0, cycleB.facets, cycleA.facets, vposA2)) {
         new_vposA = vposA2;
         return true;
     }
@@ -1661,12 +1708,10 @@ ResolutionResult resolve_self_intersection(
 // Multi-cycle resolution
 // ============================================================================
 
-static ResolutionResult resolve_multi_cycle_position_multi_isov(
+static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
     const std::vector<Cell_handle>& cell_by_index
 ) {
     const auto& cycles = v->info().facet_cycles;
@@ -1675,19 +1720,13 @@ static ResolutionResult resolve_multi_cycle_position_multi_isov(
         return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
     }
 
-    // attempt only when a local self-intersection is present.
-    const std::vector<Point> original_positions = cycle_isovertices;
-    if (!check_self_intersection(v, original_positions, dt, cell_by_index)) {
-        return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
-    }
-
-    std::vector<CycleDataPositionMultiIsov> cycle_data;
+    std::vector<CycleBoundaryInfo> cycle_data;
     cycle_data.reserve(static_cast<size_t>(num_cycles));
     for (int c = 0; c < num_cycles; ++c) {
-        cycle_data.push_back(build_cycle_data_position_multi_isov(dt, cell_by_index, v, cycles[c]));
+        cycle_data.push_back(gather_cycle_boundary_info(dt, cell_by_index, v, cycles[c]));
     }
 
-    const StarCellSetPositionMultiIsov star = build_star_cell_set_position_multi_isov(dt, v);
+    const VertexStarCells star = gather_vertex_star_cells(dt, v);
 
     bool any_changed = false;
     const double change_eps2 = 1e-6;
@@ -1701,7 +1740,7 @@ static ResolutionResult resolve_multi_cycle_position_multi_isov(
                 Point newA = cycle_isovertices[static_cast<size_t>(a)];
                 Point newB = cycle_isovertices[static_cast<size_t>(b)];
 
-                if (!find_vertex_positions_separating_cycles(
+                if (!try_separate_cycle_pair_positions(
                         dt,
                         star,
                         v,
@@ -1737,12 +1776,40 @@ static ResolutionResult resolve_multi_cycle_position_multi_isov(
         if (!any_changed) {
             return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
         }
-        return {ResolutionStatus::RESOLVED_FALLBACK, ResolutionStrategy::TWO_CYCLE_DIAMETRIC};
+        return {ResolutionStatus::RESOLVED_SPHERE, ResolutionStrategy::POSITION_MULTI_ISOV};
     }
 
-    // Fallback: retain the previous heuristic resolver when PositionMultiIsov
-    // separation tests are insufficient (e.g., >2 cycles or degenerate cases).
-    cycle_isovertices = original_positions;
+    return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::POSITION_MULTI_ISOV};
+}
+
+static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
+    Vertex_handle v,
+    std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt,
+    const UnifiedGrid& grid,
+    float isovalue,
+    const std::vector<Cell_handle>& cell_by_index
+) {
+    const int num_cycles = static_cast<int>(v->info().facet_cycles.size());
+    if (num_cycles < 2) {
+        return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
+    }
+
+    if (!check_self_intersection(v, cycle_isovertices, dt, cell_by_index)) {
+        return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
+    }
+
+    const std::vector<Point> baseline_positions = cycle_isovertices;
+
+    const ResolutionResult separation_result =
+        try_resolve_multicycle_by_cycle_separation_tests(v, cycle_isovertices, dt, cell_by_index);
+    if (separation_result.status == ResolutionStatus::RESOLVED_SPHERE) {
+        return separation_result;
+    }
+
+    // Preserve legacy behavior: restart the heuristic search from the baseline positions
+    // rather than from partially-adjusted separation-test positions.
+    cycle_isovertices = baseline_positions;
     return resolve_self_intersection(v, cycle_isovertices, dt, grid, isovalue, cell_by_index);
 }
 
@@ -1786,6 +1853,9 @@ static void update_resolution_stats(
             any_changed = true;
             pass_resolved++;
             switch (result.strategy) {
+                case ResolutionStrategy::POSITION_MULTI_ISOV:
+                    stats.strat_position_multi_isov++;
+                    break;
                 case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
                     stats.strat_two_cycle_diametric++;
                     break;
@@ -1800,6 +1870,9 @@ static void update_resolution_stats(
             any_changed = true;
             pass_fallback++;
             switch (result.strategy) {
+                case ResolutionStrategy::POSITION_MULTI_ISOV:
+                    stats.strat_position_multi_isov++;
+                    break;
                 case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
                     stats.strat_two_cycle_diametric++;
                     break;
@@ -1819,10 +1892,10 @@ static void update_resolution_stats(
 }
 
 // ============================================================================
-// Sub-routine: Compute initial cycle isovertices (Pass 1)
+// Sub-routine: Initialize isovertices per cycle
 // ============================================================================
 
-std::vector<Vertex_handle> compute_initial_cycle_isovertices(
+static std::vector<Vertex_handle> initialize_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
@@ -1882,10 +1955,10 @@ std::vector<Vertex_handle> compute_initial_cycle_isovertices(
 }
 
 // ============================================================================
-// Sub-routine: Resolve self-intersections on multi-cycle vertices (Pass 2)
+// Sub-routine: Resolve self-intersections on multi-cycle vertices
 // ============================================================================
 
-std::vector<Vertex_handle> resolve_multi_cycle_self_intersections(
+static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
@@ -1915,9 +1988,7 @@ std::vector<Vertex_handle> resolve_multi_cycle_self_intersections(
 
             auto& isovertices = vh->info().cycle_isovertices;
 
-            // First try the PositionMultiIsov orientation/half-space separation logic.
-            // Fall back to the legacy intersection-based resolver only if needed.
-            const ResolutionResult result = resolve_multi_cycle_position_multi_isov(
+            const ResolutionResult result = resolve_multicycle_self_intersection_at_vertex(
                 vh, isovertices, dt, grid, isovalue, cell_by_index);
 
             update_resolution_stats(result, stats, any_changed,
@@ -1957,10 +2028,10 @@ std::vector<Vertex_handle> resolve_multi_cycle_self_intersections(
 }
 
 // ============================================================================
-// Sub-routine: Resolve self-intersections on nearby single-cycle vertices (Pass 3)
+// Sub-routine: Resolve self-intersections on nearby single-cycle vertices
 // ============================================================================
 
-void resolve_single_cycle_self_intersections(
+static void cleanup_single_cycle_self_intersections(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
@@ -2134,7 +2205,7 @@ void resolve_single_cycle_self_intersections(
 // Sub-routine: Report isovertex computation statistics
 // ============================================================================
 
-void report_isovertex_statistics(const IsovertexComputationStats& stats) {
+static void report_isovertex_statistics(const IsovertexComputationStats& stats) {
     DEBUG_PRINT("[DEL-ISOV] Computed isovertices for "
                 << stats.single_cycle_count << " single-cycle and "
                 << stats.multi_cycle_count << " multi-cycle vertices");
@@ -2146,7 +2217,8 @@ void report_isovertex_statistics(const IsovertexComputationStats& stats) {
                     << ", resolved_fallback=" << stats.self_intersection_fallback
                     << ", unresolved=" << stats.self_intersection_unresolved);
 
-        const int64_t resolved_total = stats.strat_two_cycle_diametric +
+        const int64_t resolved_total = stats.strat_position_multi_isov +
+                                       stats.strat_two_cycle_diametric +
                                        stats.strat_fibonacci_fallback;
         if (resolved_total > 0) {
             auto pct = [&](int64_t count) -> int {
@@ -2154,6 +2226,8 @@ void report_isovertex_statistics(const IsovertexComputationStats& stats) {
             };
 
             DEBUG_PRINT("[DEL-SELFI] Resolution strategy breakdown:");
+            DEBUG_PRINT("[DEL-SELFI]   position_multi_isov: " << stats.strat_position_multi_isov
+                        << " (" << pct(stats.strat_position_multi_isov) << "%)");
             DEBUG_PRINT("[DEL-SELFI]   two_cycle_diametric: " << stats.strat_two_cycle_diametric
                         << " (" << pct(stats.strat_two_cycle_diametric) << "%)");
             DEBUG_PRINT("[DEL-SELFI]   fibonacci_fallback: " << stats.strat_fibonacci_fallback
@@ -2170,18 +2244,18 @@ void report_isovertex_statistics(const IsovertexComputationStats& stats) {
  * @brief Compute isovertex positions for all cycles around active Delaunay vertices.
  *
  * This is the main entry point for Step 9 of the Delaunay-based VDC algorithm.
- * The computation proceeds in three passes:
+ * The computation proceeds in three stages:
  *
- *   Pass 1 (compute_initial_cycle_isovertices):
+ *   Stage 1 (initialize_cycle_isovertices):
  *     Compute initial positions for all active vertices.
  *     - Single-cycle vertices: use the isosurface sample point
  *     - Multi-cycle vertices: compute Voronoi/isosurface centroids and project to sphere
  *
- *   Pass 2 (resolve_multi_cycle_self_intersections):
+ *   Stage 2 (resolve_multicycle_self_intersections):
  *     Iteratively resolve self-intersections on multi-cycle vertices.
- *     Uses multiple strategies: centroid projection, diametric placement, Fibonacci fallback.
+ *     Uses the PositionMultiIsov separation tests first, then a heuristic fallback search.
  *
- *   Pass 3 (resolve_single_cycle_self_intersections):
+ *   Stage 3 (cleanup_single_cycle_self_intersections):
  *     Targeted cleanup of single-cycle vertices near modified vertices.
  *     Checks vertices within 2 hops of modified multi-cycle vertices.
  *
@@ -2208,21 +2282,21 @@ void compute_cycle_isovertices(
     IsovertexComputationStats stats;
 
     // ========================================================================
-    // Pass 1: Compute initial isovertex positions for all active vertices.
+    // Stage 1: Compute initial isovertex positions for all active vertices.
     // ========================================================================
-    std::vector<Vertex_handle> multi_cycle_vertices = compute_initial_cycle_isovertices(
+    std::vector<Vertex_handle> multi_cycle_vertices = initialize_cycle_isovertices(
         dt, grid, isovalue, cell_by_index, stats);
 
     // ========================================================================
-    // Pass 2: Resolve self-intersections on multi-cycle vertices.
+    // Stage 2: Resolve self-intersections on multi-cycle vertices.
     // ========================================================================
-    std::vector<Vertex_handle> modified_vertices = resolve_multi_cycle_self_intersections(
+    std::vector<Vertex_handle> modified_vertices = resolve_multicycle_self_intersections(
         dt, grid, isovalue, cell_by_index, multi_cycle_vertices, stats);
 
     // ========================================================================
-    // Pass 3: Targeted cleanup of single-cycle vertices near modified multi-cycle vertices that might be affected.
+    // Stage 3: Targeted cleanup of single-cycle vertices near modified multi-cycle vertices that might be affected.
     // ========================================================================
-    resolve_single_cycle_self_intersections(
+    cleanup_single_cycle_self_intersections(
         dt, grid, isovalue, cell_by_index, modified_vertices, stats);
 
     // ========================================================================
