@@ -140,7 +140,6 @@ enum class ResolutionStatus {
 enum class ResolutionStrategy {
     NONE,                  ///< No strategy applied
     TWO_CYCLE_DIAMETRIC,   ///< Two cycles placed diametrically opposite
-    CENTROID_PROJECTION,   ///< Centroids projected to sphere surface
     FIBONACCI_FALLBACK     ///< Fibonacci spherical distribution fallback
 };
 
@@ -196,7 +195,6 @@ struct IsovertexComputationStats {
 
     // Per-strategy counts
     int64_t strat_two_cycle_diametric = 0;   ///< Uses of TWO_CYCLE_DIAMETRIC strategy
-    int64_t strat_centroid_projection = 0;   ///< Uses of CENTROID_PROJECTION strategy
     int64_t strat_fibonacci_fallback = 0;    ///< Uses of FIBONACCI_FALLBACK strategy
 };
 

@@ -974,7 +974,6 @@ double compute_sphere_radius(
 // ============================================================================
 // Self-intersection resolution helpers
 // ============================================================================
-// Note: ResolutionStatus, ResolutionStrategy, ResolutionResult are now declared in vdc_del_cycles.h
 
 static double vec_dot(const Vector3& a, const Vector3& b) {
     return a.x() * b.x() + a.y() * b.y() + a.z() * b.z();
@@ -1431,27 +1430,6 @@ struct IsovertexCandidateEvaluator {
     }
 };
 
-static void add_centroid_projection_candidates(
-    const Point& center,
-    double base_radius,
-    const std::vector<Point>& centroids,
-    IsovertexCandidateEvaluator& evaluator
-) {
-    const double radius_scales[] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0};
-    const int n = static_cast<int>(centroids.size());
-    for (double scale : radius_scales) {
-        const double r = base_radius * scale;
-        std::vector<Point> candidate(n);
-        for (int c = 0; c < n; ++c) {
-            candidate[c] = project_to_sphere(centroids[c], center, r);
-        }
-        evaluator.accept_if_better(
-            candidate,
-            ResolutionStatus::RESOLVED_SPHERE,
-            ResolutionStrategy::CENTROID_PROJECTION);
-    }
-}
-
 static void add_two_cycle_diametric_opposite_candidates(
     const Point& center,
     double base_radius,
@@ -1645,14 +1623,6 @@ ResolutionResult resolve_self_intersection(
 
     IsovertexCandidateEvaluator evaluator{v, dt, cell_by_index, original_positions, min_sep2};
 
-    add_centroid_projection_candidates(center, base_radius, centroids, evaluator);
-
-    // If simple centroid-based placements resolve the issue, avoid expensive fallbacks.
-    if (evaluator.found_candidate) {
-        cycle_isovertices = evaluator.best_candidate;
-        return {evaluator.best_status, evaluator.best_strategy};
-    }
-
     if (n == 2) {
         add_two_cycle_diametric_opposite_candidates(center, base_radius, centroids, evaluator);
     }
@@ -1705,8 +1675,7 @@ static ResolutionResult resolve_multi_cycle_position_multi_isov(
         return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
     }
 
-    // attempt when a local self-intersection is present.
-    // otherwise will risk perturbing the mesh and introducing global self-intersections.
+    // attempt only when a local self-intersection is present.
     const std::vector<Point> original_positions = cycle_isovertices;
     if (!check_self_intersection(v, original_positions, dt, cell_by_index)) {
         return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
@@ -1721,8 +1690,8 @@ static ResolutionResult resolve_multi_cycle_position_multi_isov(
     const StarCellSetPositionMultiIsov star = build_star_cell_set_position_multi_isov(dt, v);
 
     bool any_changed = false;
-    const double change_eps2 = 1e-24;
-    const int MAX_PAIRWISE_PASSES = 4;
+    const double change_eps2 = 1e-6;
+    const int MAX_PAIRWISE_PASSES = 6;
 
     for (int pass = 0; pass < MAX_PAIRWISE_PASSES; ++pass) {
         bool pass_changed = false;
@@ -1817,9 +1786,6 @@ static void update_resolution_stats(
             any_changed = true;
             pass_resolved++;
             switch (result.strategy) {
-                case ResolutionStrategy::CENTROID_PROJECTION:
-                    stats.strat_centroid_projection++;
-                    break;
                 case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
                     stats.strat_two_cycle_diametric++;
                     break;
@@ -1834,9 +1800,6 @@ static void update_resolution_stats(
             any_changed = true;
             pass_fallback++;
             switch (result.strategy) {
-                case ResolutionStrategy::CENTROID_PROJECTION:
-                    stats.strat_centroid_projection++;
-                    break;
                 case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
                     stats.strat_two_cycle_diametric++;
                     break;
@@ -2184,7 +2147,6 @@ void report_isovertex_statistics(const IsovertexComputationStats& stats) {
                     << ", unresolved=" << stats.self_intersection_unresolved);
 
         const int64_t resolved_total = stats.strat_two_cycle_diametric +
-                                       stats.strat_centroid_projection +
                                        stats.strat_fibonacci_fallback;
         if (resolved_total > 0) {
             auto pct = [&](int64_t count) -> int {
@@ -2192,8 +2154,6 @@ void report_isovertex_statistics(const IsovertexComputationStats& stats) {
             };
 
             DEBUG_PRINT("[DEL-SELFI] Resolution strategy breakdown:");
-            DEBUG_PRINT("[DEL-SELFI]   centroid_projection: " << stats.strat_centroid_projection
-                        << " (" << pct(stats.strat_centroid_projection) << "%)");
             DEBUG_PRINT("[DEL-SELFI]   two_cycle_diametric: " << stats.strat_two_cycle_diametric
                         << " (" << pct(stats.strat_two_cycle_diametric) << "%)");
             DEBUG_PRINT("[DEL-SELFI]   fibonacci_fallback: " << stats.strat_fibonacci_fallback
@@ -2260,12 +2220,10 @@ void compute_cycle_isovertices(
         dt, grid, isovalue, cell_by_index, multi_cycle_vertices, stats);
 
     // ========================================================================
-    // Pass 3: Targeted cleanup of single-cycle vertices near modified vertices.
+    // Pass 3: Targeted cleanup of single-cycle vertices near modified multi-cycle vertices that might be affected.
     // ========================================================================
     resolve_single_cycle_self_intersections(
         dt, grid, isovalue, cell_by_index, modified_vertices, stats);
-
-
 
     // ========================================================================
     // Report final statistics.
