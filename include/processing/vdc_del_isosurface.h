@@ -42,6 +42,7 @@ struct DelaunayIsosurface {
     std::vector<int> isovertex_delaunay_vertex;          ///< Delaunay vertex index for each isovertex
     std::vector<int> isovertex_cycle_index;              ///< Cycle index for each isovertex
     std::vector<std::array<int, 3>> triangles;           ///< Output triangles (indices into isovertices)
+    std::array<double, 3> vertex_scale{1.0, 1.0, 1.0};   ///< Per-axis scale to convert from grid units to physical space
 
     //! @brief Mapping from (delaunay_vertex_index, cycle_index) -> isovertex index
     std::unordered_map<std::pair<int, int>, int, VertexCycleKeyHash> vertex_cycle_to_isovertex;
