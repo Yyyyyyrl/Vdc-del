@@ -129,8 +129,7 @@ struct FacetMatchingData {
  */
 enum class ResolutionStatus {
     NOT_NEEDED,       ///< No self-intersection detected
-    RESOLVED_SPHERE,  ///< Resolved by sphere-based projection
-    RESOLVED_FALLBACK,///< Resolved by fallback distribution strategy
+    RESOLVED,         ///< Successfully resolved self-intersection
     UNRESOLVED        ///< Could not resolve self-intersection
 };
 
@@ -139,9 +138,8 @@ enum class ResolutionStatus {
  */
 enum class ResolutionStrategy {
     NONE,                  ///< No strategy applied
-    POSITION_MULTI_ISOV,   ///< PositionMultiIsov separation tests
-    TWO_CYCLE_DIAMETRIC,   ///< Two cycles placed diametrically opposite
-    FIBONACCI_FALLBACK     ///< Fibonacci spherical distribution fallback
+    GEOMETRIC_SEPARATION,  ///< Bisecting plane / reflection separation tests
+    FIBONACCI_SPHERE       ///< Fibonacci spherical distribution
 };
 
 /**
@@ -179,15 +177,13 @@ struct IsovertexComputationStats {
     int single_cycle_count = 0;              ///< Number of single-cycle vertices
     int multi_cycle_count = 0;               ///< Number of multi-cycle vertices
     int self_intersection_detected = 0;      ///< Total self-intersections detected
-    int self_intersection_resolved = 0;      ///< Resolved by sphere projection
-    int self_intersection_fallback = 0;      ///< Resolved by fallback strategy
+    int self_intersection_resolved = 0;      ///< Successfully resolved
     int self_intersection_unresolved = 0;    ///< Unresolved self-intersections
     bool had_unresolved = false;             ///< Whether any case remained unresolved
 
     // Per-strategy counts
-    int64_t strat_position_multi_isov = 0;   ///< Uses of POSITION_MULTI_ISOV strategy
-    int64_t strat_two_cycle_diametric = 0;   ///< Uses of TWO_CYCLE_DIAMETRIC strategy
-    int64_t strat_fibonacci_fallback = 0;    ///< Uses of FIBONACCI_FALLBACK strategy
+    int64_t strat_geometric_separation = 0;  ///< Uses of GEOMETRIC_SEPARATION strategy
+    int64_t strat_fibonacci_sphere = 0;      ///< Uses of FIBONACCI_SPHERE strategy
 };
 
 // ============================================================================

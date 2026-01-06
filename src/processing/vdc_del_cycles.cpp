@@ -1378,6 +1378,29 @@ static Point reflect_through_center(const Point& center, const Point& p) {
         2.0 * center.z() - p.z());
 }
 
+/**
+ * @brief Reflect a point through center and project to specified radius.
+ *
+ * The reflected point is placed on the opposite side of center,
+ * at the specified distance (radius) from center.
+ */
+static Point reflect_at_radius(const Point& center, const Point& p, double radius) {
+    const double dx = center.x() - p.x();
+    const double dy = center.y() - p.y();
+    const double dz = center.z() - p.z();
+    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < 1e-12) {
+        // p is at center, return arbitrary point at radius
+        return Point(center.x() + radius, center.y(), center.z());
+    }
+    // Unit direction from p to center, then continue to opposite side at radius
+    const double scale = radius / dist;
+    return Point(
+        center.x() + dx * scale,
+        center.y() + dy * scale,
+        center.z() + dz * scale);
+}
+
 static bool try_separate_cycle_pair_positions(
     const Delaunay& dt,
     const VertexStarCells& star,
@@ -1386,17 +1409,21 @@ static bool try_separate_cycle_pair_positions(
     const CycleBoundaryInfo& cycleB,
     const Point& vposA,
     const Point& vposB,
+    double base_radius,
     Point& new_vposA,
     Point& new_vposB
 ) {
     new_vposA = vposA;
     new_vposB = vposB;
 
+    // First check: do current positions already satisfy bisecting plane separation?
     if (bisecting_plane_separates_cycle_boundaries(cycleA, cycleB, vposA, vposB)) {
         return true;
     }
 
     const Point center = v0->point();
+
+    // Try original radius first (simple reflection through center)
     const Point vposB2 = reflect_through_center(center, vposA);
     if (passes_cycle_barrier_orientation_test(dt, star, v0, cycleA.facets, cycleB.facets, vposB2)) {
         new_vposB = vposB2;
@@ -1409,8 +1436,29 @@ static bool try_separate_cycle_pair_positions(
         return true;
     }
 
+    // Try multiple radius scales for reflection
+    const double radius_scales[] = {0.5, 0.75, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0};
+    for (double scale : radius_scales) {
+        const double r = base_radius * scale;
+
+        // Try reflecting A to get new position for B at scaled radius
+        const Point vposBr = reflect_at_radius(center, vposA, r);
+        if (passes_cycle_barrier_orientation_test(dt, star, v0, cycleA.facets, cycleB.facets, vposBr)) {
+            new_vposB = vposBr;
+            return true;
+        }
+
+        // Try reflecting B to get new position for A at scaled radius
+        const Point vposAr = reflect_at_radius(center, vposB, r);
+        if (passes_cycle_barrier_orientation_test(dt, star, v0, cycleB.facets, cycleA.facets, vposAr)) {
+            new_vposA = vposAr;
+            return true;
+        }
+    }
+
     return false;
 }
+
 
 static uint32_t xorshift32(uint32_t& state) {
     state ^= state << 13;
@@ -1476,56 +1524,6 @@ struct SphericalCandidateSearch {
         return false;
     }
 };
-
-static void consider_diametric_two_cycle_candidates(
-    const Point& center,
-    double base_radius,
-    const std::vector<Point>& centroids,
-    SphericalCandidateSearch& search
-) {
-    if (centroids.size() != 2) {
-        return;
-    }
-
-    // First try reflecting the current positions 
-    if (search.original_positions.size() == 2) {
-        std::vector<Point> cand = search.original_positions;
-        cand[1] = reflect_through_center(center, search.original_positions[0]);
-        search.consider_candidate(
-            cand,
-            ResolutionStatus::RESOLVED_FALLBACK,
-            ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
-
-        cand = search.original_positions;
-        cand[0] = reflect_through_center(center, search.original_positions[1]);
-        search.consider_candidate(
-            cand,
-            ResolutionStatus::RESOLVED_FALLBACK,
-            ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
-    }
-
-    const double radius_scales[] = {0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0};
-    for (double scale : radius_scales) {
-        const double r = base_radius * scale;
-
-        const Point vposA = project_to_sphere(centroids[0], center, r);
-        std::vector<Point> cand(2);
-        cand[0] = vposA;
-        cand[1] = reflect_through_center(center, vposA);
-        search.consider_candidate(
-            cand,
-            ResolutionStatus::RESOLVED_FALLBACK,
-            ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
-
-        const Point vposB = project_to_sphere(centroids[1], center, r);
-        cand[1] = vposB;
-        cand[0] = reflect_through_center(center, vposB);
-        search.consider_candidate(
-            cand,
-            ResolutionStatus::RESOLVED_FALLBACK,
-            ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
-    }
-}
 
 static void consider_rotated_fibonacci_candidates(
     const Point& center,
@@ -1595,15 +1593,15 @@ static void consider_rotated_fibonacci_candidates(
 
             search.consider_candidate(
                 candidate,
-                ResolutionStatus::RESOLVED_FALLBACK,
-                ResolutionStrategy::FIBONACCI_FALLBACK);
+                ResolutionStatus::RESOLVED,
+                ResolutionStrategy::FIBONACCI_SPHERE);
 
             if (n == 2) {
                 std::swap(candidate[0], candidate[1]);
                 search.consider_candidate(
                     candidate,
-                    ResolutionStatus::RESOLVED_FALLBACK,
-                    ResolutionStrategy::FIBONACCI_FALLBACK);
+                    ResolutionStatus::RESOLVED,
+                    ResolutionStrategy::FIBONACCI_SPHERE);
             }
         }
     }
@@ -1611,12 +1609,9 @@ static void consider_rotated_fibonacci_candidates(
 
 //! @brief Attempt to resolve a vertex-local self-intersection via spherical candidate search.
 /*!
- * Tries multiple discrete candidate families on concentric spheres around the Delaunay site.
- *
- * Candidate families:
- * - `ResolutionStrategy::TWO_CYCLE_DIAMETRIC` (n==2): enforce a diametric (opposite) placement.
- * - `ResolutionStrategy::FIBONACCI_FALLBACK` (n>=1): rotate a Fibonacci sphere distribution and
- *   greedily assign directions to match per-cycle centroid directions.
+ * Uses Fibonacci sphere distribution to generate evenly-spaced candidate positions
+ * on concentric spheres around the Delaunay site, then greedily assigns directions
+ * to match per-cycle centroid directions.
  *
  * @param v The vertex with potential self-intersection
  * @param cycle_isovertices The isovertex positions to modify
@@ -1666,13 +1661,8 @@ static ResolutionResult solve_local_self_intersection_by_spherical_candidate_sea
 
     SphericalCandidateSearch search{v, dt, cell_by_index, original_positions, min_sep2};
 
-    if (n == 2) {
-        consider_diametric_two_cycle_candidates(center, base_radius, centroids, search);
-    }
-
-    if (!search.found_solution) {
-        consider_rotated_fibonacci_candidates(center, base_radius, centroid_dirs, search);
-    }
+    // Use Fibonacci sphere distribution to find non-intersecting positions
+    consider_rotated_fibonacci_candidates(center, base_radius, centroid_dirs, search);
 
     if (search.found_solution) {
         cycle_isovertices = search.best_positions;
@@ -1708,6 +1698,7 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
+    const UnifiedGrid& grid,
     const std::vector<Cell_handle>& cell_by_index
 ) {
     const auto& cycles = v->info().facet_cycles;
@@ -1723,6 +1714,9 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     }
 
     const VertexStarCells star = gather_vertex_star_cells(dt, v);
+
+    // Compute base radius for multi-radius search
+    const double base_radius = compute_sphere_radius(v, dt, grid);
 
     bool any_changed = false;
     const double change_eps2 = 1e-6;
@@ -1744,10 +1738,12 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                         cycle_data[static_cast<size_t>(b)],
                         cycle_isovertices[static_cast<size_t>(a)],
                         cycle_isovertices[static_cast<size_t>(b)],
+                        base_radius,
                         newA,
                         newB)) {
                     continue;
                 }
+
 
                 if (squared_distance(newA, cycle_isovertices[static_cast<size_t>(a)]) > change_eps2) {
                     cycle_isovertices[static_cast<size_t>(a)] = newA;
@@ -1772,10 +1768,10 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         if (!any_changed) {
             return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
         }
-        return {ResolutionStatus::RESOLVED_SPHERE, ResolutionStrategy::POSITION_MULTI_ISOV};
+        return {ResolutionStatus::RESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
     }
 
-    return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::POSITION_MULTI_ISOV};
+    return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
 }
 
 static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
@@ -1798,8 +1794,8 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     const std::vector<Point> baseline_positions = cycle_isovertices;
 
     const ResolutionResult separation_result =
-        try_resolve_multicycle_by_cycle_separation_tests(v, cycle_isovertices, dt, cell_by_index);
-    if (separation_result.status == ResolutionStatus::RESOLVED_SPHERE) {
+        try_resolve_multicycle_by_cycle_separation_tests(v, cycle_isovertices, dt, grid, cell_by_index);
+    if (separation_result.status == ResolutionStatus::RESOLVED) {
         return separation_result;
     }
 
@@ -1820,12 +1816,11 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
  * This helper consolidates the repetitive switch logic for updating stats
  * after each resolution attempt.
  * 
- * @param result The resolution result from `solve_local_self_intersection_by_spherical_candidate_search`.
+ * @param result The resolution result from resolution attempts.
  * @param stats [in/out] Statistics to update.
  * @param any_changed [out] Set to true if resolution changed isovertices.
  * @param pass_detected [out] Incremented if self-intersection was detected.
- * @param pass_resolved [out] Incremented if resolved via sphere projection.
- * @param pass_fallback [out] Incremented if resolved via fallback strategy.
+ * @param pass_resolved [out] Incremented if successfully resolved.
  * @param pass_unresolved [out] Incremented if resolution failed.
  */
 static void update_resolution_stats(
@@ -1834,7 +1829,6 @@ static void update_resolution_stats(
     bool& any_changed,
     int& pass_detected,
     int& pass_resolved,
-    int& pass_fallback,
     int& pass_unresolved
 ) {
     const ResolutionStatus status = result.status;
@@ -1846,35 +1840,15 @@ static void update_resolution_stats(
     switch (status) {
         case ResolutionStatus::NOT_NEEDED:
             break;
-        case ResolutionStatus::RESOLVED_SPHERE:
+        case ResolutionStatus::RESOLVED:
             any_changed = true;
             pass_resolved++;
             switch (result.strategy) {
-                case ResolutionStrategy::POSITION_MULTI_ISOV:
-                    stats.strat_position_multi_isov++;
+                case ResolutionStrategy::GEOMETRIC_SEPARATION:
+                    stats.strat_geometric_separation++;
                     break;
-                case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
-                    stats.strat_two_cycle_diametric++;
-                    break;
-                case ResolutionStrategy::FIBONACCI_FALLBACK:
-                    stats.strat_fibonacci_fallback++;
-                    break;
-                default:
-                    break;
-            }
-            break;
-        case ResolutionStatus::RESOLVED_FALLBACK:
-            any_changed = true;
-            pass_fallback++;
-            switch (result.strategy) {
-                case ResolutionStrategy::POSITION_MULTI_ISOV:
-                    stats.strat_position_multi_isov++;
-                    break;
-                case ResolutionStrategy::TWO_CYCLE_DIAMETRIC:
-                    stats.strat_two_cycle_diametric++;
-                    break;
-                case ResolutionStrategy::FIBONACCI_FALLBACK:
-                    stats.strat_fibonacci_fallback++;
+                case ResolutionStrategy::FIBONACCI_SPHERE:
+                    stats.strat_fibonacci_sphere++;
                     break;
                 default:
                     break;
@@ -1974,7 +1948,6 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
         bool any_changed = false;
         int pass_detected = 0;
         int pass_resolved = 0;
-        int pass_fallback = 0;
         int pass_unresolved = 0;
 
         // Process each multi-cycle vertex for self-intersection.
@@ -1989,12 +1962,11 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
                 vh, isovertices, dt, grid, isovalue, cell_by_index);
 
             update_resolution_stats(result, stats, any_changed,
-                pass_detected, pass_resolved, pass_fallback, pass_unresolved);
+                pass_detected, pass_resolved, pass_unresolved);
 
             // Track which vertices were modified for targeted cleanup passes.
             const ResolutionStatus status = result.status;
-            if (status == ResolutionStatus::RESOLVED_SPHERE ||
-                status == ResolutionStatus::RESOLVED_FALLBACK ||
+            if (status == ResolutionStatus::RESOLVED ||
                 status == ResolutionStatus::UNRESOLVED) {
                 if (modified_multi_cycle_indices.insert(vh->info().index).second) {
                     modified_multi_cycle_vertices.push_back(vh);
@@ -2005,13 +1977,11 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
         // Accumulate pass statistics into overall stats.
         stats.self_intersection_detected += pass_detected;
         stats.self_intersection_resolved += pass_resolved;
-        stats.self_intersection_fallback += pass_fallback;
 
         if (pass_detected > 0) {
             DEBUG_PRINT("[DEL-SELFI] multi-cycle pass " << (pass + 1) << "/" << MAX_MULTI_CYCLE_PASSES
                         << ": detected=" << pass_detected
                         << ", resolved=" << pass_resolved
-                        << ", fallback=" << pass_fallback
                         << ", unresolved=" << pass_unresolved);
         }
 
@@ -2037,25 +2007,21 @@ static void report_isovertex_statistics(const IsovertexComputationStats& stats) 
     if (stats.self_intersection_detected > 0) {
         DEBUG_PRINT("[DEL-SELFI] Self-intersection stats: "
                     << "detected=" << stats.self_intersection_detected
-                    << ", resolved_sphere=" << stats.self_intersection_resolved
-                    << ", resolved_fallback=" << stats.self_intersection_fallback
+                    << ", resolved=" << stats.self_intersection_resolved
                     << ", unresolved=" << stats.self_intersection_unresolved);
 
-        const int64_t resolved_total = stats.strat_position_multi_isov +
-                                       stats.strat_two_cycle_diametric +
-                                       stats.strat_fibonacci_fallback;
+        const int64_t resolved_total = stats.strat_geometric_separation +
+                                       stats.strat_fibonacci_sphere;
         if (resolved_total > 0) {
             auto pct = [&](int64_t count) -> int {
                 return static_cast<int>((count * 100 + resolved_total / 2) / resolved_total);
             };
 
             DEBUG_PRINT("[DEL-SELFI] Resolution strategy breakdown:");
-            DEBUG_PRINT("[DEL-SELFI]   position_multi_isov: " << stats.strat_position_multi_isov
-                        << " (" << pct(stats.strat_position_multi_isov) << "%)");
-            DEBUG_PRINT("[DEL-SELFI]   two_cycle_diametric: " << stats.strat_two_cycle_diametric
-                        << " (" << pct(stats.strat_two_cycle_diametric) << "%)");
-            DEBUG_PRINT("[DEL-SELFI]   fibonacci_fallback: " << stats.strat_fibonacci_fallback
-                        << " (" << pct(stats.strat_fibonacci_fallback) << "%)");
+            DEBUG_PRINT("[DEL-SELFI]   geometric_separation: " << stats.strat_geometric_separation
+                        << " (" << pct(stats.strat_geometric_separation) << "%)");
+            DEBUG_PRINT("[DEL-SELFI]   fibonacci_sphere: " << stats.strat_fibonacci_sphere
+                        << " (" << pct(stats.strat_fibonacci_sphere) << "%)");
         }
     }
 }
