@@ -1433,20 +1433,20 @@ static Vector3 rotate_axis_angle(const Vector3& vec, const Vector3& axis_unit, d
     return term0 + term1 + term2;
 }
 
-struct IsovertexCandidateEvaluator {
+struct SphericalCandidateSearch {
     Vertex_handle v;
     const Delaunay& dt;
     const std::vector<Cell_handle>& cell_by_index;
     const std::vector<Point>& original_positions;
     double min_sep2 = 0.0;
 
-    bool found_candidate = false;
+    bool found_solution = false;
     double best_cost = std::numeric_limits<double>::infinity();
-    std::vector<Point> best_candidate;
+    std::vector<Point> best_positions;
     ResolutionStatus best_status = ResolutionStatus::UNRESOLVED;
     ResolutionStrategy best_strategy = ResolutionStrategy::NONE;
 
-    bool accept_if_better(
+    bool consider_candidate(
         const std::vector<Point>& candidate,
         ResolutionStatus status,
         ResolutionStrategy strategy
@@ -1464,10 +1464,10 @@ struct IsovertexCandidateEvaluator {
             cost += squared_distance(candidate[i], original_positions[i]);
         }
 
-        if (!found_candidate || cost < best_cost) {
-            found_candidate = true;
+        if (!found_solution || cost < best_cost) {
+            found_solution = true;
             best_cost = cost;
-            best_candidate = candidate;
+            best_positions = candidate;
             best_status = status;
             best_strategy = strategy;
             return true;
@@ -1477,35 +1477,28 @@ struct IsovertexCandidateEvaluator {
     }
 };
 
-static void add_two_cycle_diametric_opposite_candidates(
+static void consider_diametric_two_cycle_candidates(
     const Point& center,
     double base_radius,
     const std::vector<Point>& centroids,
-    IsovertexCandidateEvaluator& evaluator
+    SphericalCandidateSearch& search
 ) {
     if (centroids.size() != 2) {
         return;
     }
 
-    auto diametric_opposite = [&](const Point& p) -> Point {
-        return Point(
-            2.0 * center.x() - p.x(),
-            2.0 * center.y() - p.y(),
-            2.0 * center.z() - p.z());
-    };
-
     // First try reflecting the current positions 
-    if (evaluator.original_positions.size() == 2) {
-        std::vector<Point> cand = evaluator.original_positions;
-        cand[1] = diametric_opposite(evaluator.original_positions[0]);
-        evaluator.accept_if_better(
+    if (search.original_positions.size() == 2) {
+        std::vector<Point> cand = search.original_positions;
+        cand[1] = reflect_through_center(center, search.original_positions[0]);
+        search.consider_candidate(
             cand,
             ResolutionStatus::RESOLVED_FALLBACK,
             ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
 
-        cand = evaluator.original_positions;
-        cand[0] = diametric_opposite(evaluator.original_positions[1]);
-        evaluator.accept_if_better(
+        cand = search.original_positions;
+        cand[0] = reflect_through_center(center, search.original_positions[1]);
+        search.consider_candidate(
             cand,
             ResolutionStatus::RESOLVED_FALLBACK,
             ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
@@ -1518,27 +1511,27 @@ static void add_two_cycle_diametric_opposite_candidates(
         const Point vposA = project_to_sphere(centroids[0], center, r);
         std::vector<Point> cand(2);
         cand[0] = vposA;
-        cand[1] = diametric_opposite(vposA);
-        evaluator.accept_if_better(
+        cand[1] = reflect_through_center(center, vposA);
+        search.consider_candidate(
             cand,
             ResolutionStatus::RESOLVED_FALLBACK,
             ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
 
         const Point vposB = project_to_sphere(centroids[1], center, r);
         cand[1] = vposB;
-        cand[0] = diametric_opposite(vposB);
-        evaluator.accept_if_better(
+        cand[0] = reflect_through_center(center, vposB);
+        search.consider_candidate(
             cand,
             ResolutionStatus::RESOLVED_FALLBACK,
             ResolutionStrategy::TWO_CYCLE_DIAMETRIC);
     }
 }
 
-static void add_fibonacci_fallback_candidates(
+static void consider_rotated_fibonacci_candidates(
     const Point& center,
     double base_radius,
     const std::vector<Vector3>& centroid_dirs,
-    IsovertexCandidateEvaluator& evaluator
+    SphericalCandidateSearch& search
 ) {
     const int n = static_cast<int>(centroid_dirs.size());
     if (n < 1) {
@@ -1555,7 +1548,7 @@ static void add_fibonacci_fallback_candidates(
         const double r = base_radius * s;
 
         for (int attempt = 0; attempt < fallback_attempts; ++attempt) {
-            uint32_t prng = static_cast<uint32_t>(evaluator.v->info().index) * 747796405u +
+            uint32_t prng = static_cast<uint32_t>(search.v->info().index) * 747796405u +
                             static_cast<uint32_t>(attempt) * 2891336453u + 277803737u;
 
             const Vector3 axis = vec_normalize_or(
@@ -1600,14 +1593,14 @@ static void add_fibonacci_fallback_candidates(
                 candidate[c] = center + dirs[assign[c]] * r;
             }
 
-            evaluator.accept_if_better(
+            search.consider_candidate(
                 candidate,
                 ResolutionStatus::RESOLVED_FALLBACK,
                 ResolutionStrategy::FIBONACCI_FALLBACK);
 
             if (n == 2) {
                 std::swap(candidate[0], candidate[1]);
-                evaluator.accept_if_better(
+                search.consider_candidate(
                     candidate,
                     ResolutionStatus::RESOLVED_FALLBACK,
                     ResolutionStrategy::FIBONACCI_FALLBACK);
@@ -1616,11 +1609,14 @@ static void add_fibonacci_fallback_candidates(
     }
 }
 
-//! @brief Attempt to resolve self-intersection for a multi-cycle vertex
+//! @brief Attempt to resolve a vertex-local self-intersection via spherical candidate search.
 /*!
- * Tries multiple strategies to eliminate self-intersections between cycles:
- * 1. Increase sphere radius (tries 1x, 2x, 3x of base radius)
- * 2. uniform spherical distribution with different rotations
+ * Tries multiple discrete candidate families on concentric spheres around the Delaunay site.
+ *
+ * Candidate families:
+ * - `ResolutionStrategy::TWO_CYCLE_DIAMETRIC` (n==2): enforce a diametric (opposite) placement.
+ * - `ResolutionStrategy::FIBONACCI_FALLBACK` (n>=1): rotate a Fibonacci sphere distribution and
+ *   greedily assign directions to match per-cycle centroid directions.
  *
  * @param v The vertex with potential self-intersection
  * @param cycle_isovertices The isovertex positions to modify
@@ -1630,7 +1626,7 @@ static void add_fibonacci_fallback_candidates(
  * @param cell_by_index Cell handles indexed by `cell->info().index`
  * @return Resolution status indicating what happened
  */
-ResolutionResult resolve_self_intersection(
+static ResolutionResult solve_local_self_intersection_by_spherical_candidate_search(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
@@ -1668,19 +1664,19 @@ ResolutionResult resolve_self_intersection(
     const double min_sep = std::max(1e-8, base_radius * 1e-3);
     const double min_sep2 = min_sep * min_sep;
 
-    IsovertexCandidateEvaluator evaluator{v, dt, cell_by_index, original_positions, min_sep2};
+    SphericalCandidateSearch search{v, dt, cell_by_index, original_positions, min_sep2};
 
     if (n == 2) {
-        add_two_cycle_diametric_opposite_candidates(center, base_radius, centroids, evaluator);
+        consider_diametric_two_cycle_candidates(center, base_radius, centroids, search);
     }
 
-    if (!evaluator.found_candidate) {
-        add_fibonacci_fallback_candidates(center, base_radius, centroid_dirs, evaluator);
+    if (!search.found_solution) {
+        consider_rotated_fibonacci_candidates(center, base_radius, centroid_dirs, search);
     }
 
-    if (evaluator.found_candidate) {
-        cycle_isovertices = evaluator.best_candidate;
-        return {evaluator.best_status, evaluator.best_strategy};
+    if (search.found_solution) {
+        cycle_isovertices = search.best_positions;
+        return {search.best_status, search.best_strategy};
     }
 
     cycle_isovertices = original_positions;
@@ -1810,7 +1806,8 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     // Preserve legacy behavior: restart the heuristic search from the baseline positions
     // rather than from partially-adjusted separation-test positions.
     cycle_isovertices = baseline_positions;
-    return resolve_self_intersection(v, cycle_isovertices, dt, grid, isovalue, cell_by_index);
+    return solve_local_self_intersection_by_spherical_candidate_search(
+        v, cycle_isovertices, dt, grid, isovalue, cell_by_index);
 }
 
 // ============================================================================
@@ -1823,7 +1820,7 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
  * This helper consolidates the repetitive switch logic for updating stats
  * after each resolution attempt.
  * 
- * @param result The resolution result from resolve_self_intersection.
+ * @param result The resolution result from `solve_local_self_intersection_by_spherical_candidate_search`.
  * @param stats [in/out] Statistics to update.
  * @param any_changed [out] Set to true if resolution changed isovertices.
  * @param pass_detected [out] Incremented if self-intersection was detected.
@@ -2027,179 +2024,6 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
     return modified_multi_cycle_vertices;
 }
 
-// ============================================================================
-// Sub-routine: Resolve self-intersections on nearby single-cycle vertices
-// ============================================================================
-
-static void cleanup_single_cycle_self_intersections(
-    Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    const std::vector<Cell_handle>& cell_by_index,
-    const std::vector<Vertex_handle>& seed_vertices,
-    IsovertexComputationStats& stats
-) {
-    const int max_hops = 2;  // Hard-coded hop radius for single-cycle cleanup
-    if (seed_vertices.empty()) {
-        return;
-    }
-
-    std::vector<Vertex_handle> single_cycle_candidates;
-    std::vector<uint8_t> is_candidate(static_cast<size_t>(dt.number_of_vertices() + 1), 0);
-    std::vector<uint8_t> visited(static_cast<size_t>(dt.number_of_vertices() + 1), 0);
-    std::vector<Edge> incident_edges;
-    incident_edges.reserve(32);
-
-    auto ensure_index_capacity = [&](int idx) {
-        if (idx < 0) {
-            return;
-        }
-        const size_t needed = static_cast<size_t>(idx) + 1;
-        if (needed > visited.size()) {
-            visited.resize(needed, 0);
-            is_candidate.resize(needed, 0);
-        }
-    };
-
-    // Lambda to gather single-cycle vertices within a certain hop distance.
-    auto add_single_cycle_candidates_within_hops = [&](
-        const std::vector<Vertex_handle>& seeds,
-        int max_hops
-    ) {
-        std::fill(visited.begin(), visited.end(), 0);
-
-        std::vector<Vertex_handle> frontier;
-        frontier.reserve(seeds.size());
-        for (Vertex_handle vh : seeds) {
-            if (vh == Vertex_handle()) {
-                continue;
-            }
-            if (!vh->info().active || vh->info().is_dummy) {
-                continue;
-            }
-            const int seed_idx = vh->info().index;
-            if (seed_idx < 0) {
-                continue;
-            }
-            ensure_index_capacity(seed_idx);
-            if (visited[static_cast<size_t>(seed_idx)] == 0) {
-                visited[static_cast<size_t>(seed_idx)] = 1;
-                frontier.push_back(vh);
-            }
-        }
-
-        for (int depth = 0; depth < max_hops; ++depth) {
-            std::vector<Vertex_handle> next_frontier;
-            next_frontier.reserve(frontier.size() * 4);
-
-            for (Vertex_handle src : frontier) {
-                incident_edges.clear();
-                dt.incident_edges(src, std::back_inserter(incident_edges));
-
-                for (const Edge& e : incident_edges) {
-                    Vertex_handle a = e.first->vertex(e.second);
-                    Vertex_handle b = e.first->vertex(e.third);
-                    Vertex_handle other = (a == src) ? b : a;
-
-                    if (dt.is_infinite(other)) continue;
-                    if (other->info().is_dummy) continue;
-                    if (!other->info().active) continue;
-
-                    const int other_idx = other->info().index;
-                    if (other_idx < 0) {
-                        continue;
-                    }
-                    ensure_index_capacity(other_idx);
-                    if (visited[static_cast<size_t>(other_idx)] == 0) {
-                        visited[static_cast<size_t>(other_idx)] = 1;
-                        next_frontier.push_back(other);
-                    }
-
-                    // Collect single-cycle candidates.
-                    if (other->info().facet_cycles.size() == 1 &&
-                        other->info().facet_cycles[0].size() >= 4) {
-                        if (static_cast<size_t>(other_idx) < is_candidate.size() &&
-                            is_candidate[static_cast<size_t>(other_idx)] == 0) {
-                            is_candidate[static_cast<size_t>(other_idx)] = 1;
-                            single_cycle_candidates.push_back(other);
-                        }
-                    }
-                }
-            }
-
-            frontier.swap(next_frontier);
-            if (frontier.empty()) {
-                break;
-            }
-        }
-    };
-
-    // Targeted cleanup: check single-cycle vertices within a small hop radius of seed vertices.
-    add_single_cycle_candidates_within_hops(seed_vertices, max_hops);
-
-    const int MAX_SINGLE_CYCLE_PASSES = 2;
-    const int MAX_EXPANSION_ROUNDS = 2;
-    
-    for (int round = 0; round < MAX_EXPANSION_ROUNDS; ++round) {
-        std::vector<Vertex_handle> unresolved_vertices;
-        unresolved_vertices.reserve(32);
-
-        for (int pass = 0; pass < MAX_SINGLE_CYCLE_PASSES; ++pass) {
-            bool any_changed = false;
-            int pass_detected = 0;
-            int pass_resolved = 0;
-            int pass_fallback = 0;
-            int pass_unresolved = 0;
-
-            unresolved_vertices.clear();
-
-            for (Vertex_handle vh : single_cycle_candidates) {
-                if (!vh->info().active) continue;
-                if (vh->info().is_dummy) continue;
-                if (vh->info().facet_cycles.size() != 1) continue;
-
-                auto& isovertices = vh->info().cycle_isovertices;
-                const ResolutionResult result = resolve_self_intersection(
-                    vh, isovertices, dt, grid, isovalue, cell_by_index);
-
-                update_resolution_stats(result, stats, any_changed,
-                    pass_detected, pass_resolved, pass_fallback, pass_unresolved);
-
-                if (result.status == ResolutionStatus::UNRESOLVED) {
-                    unresolved_vertices.push_back(vh);
-                }
-            }
-
-            stats.self_intersection_detected += pass_detected;
-            stats.self_intersection_resolved += pass_resolved;
-            stats.self_intersection_fallback += pass_fallback;
-
-            if (pass_detected > 0) {
-                DEBUG_PRINT("[DEL-SELFI] single-cycle pass " << (pass + 1) << "/" << MAX_SINGLE_CYCLE_PASSES
-                            << ": detected=" << pass_detected
-                            << ", resolved=" << pass_resolved
-                            << ", fallback=" << pass_fallback
-                            << ", unresolved=" << pass_unresolved);
-            }
-
-            if (!any_changed) {
-                break;
-            }
-        }
-
-        if (unresolved_vertices.empty()) {
-            break;
-        }
-
-        // Expand the candidate region around unresolved single-cycle vertices.
-        const size_t before = single_cycle_candidates.size();
-        add_single_cycle_candidates_within_hops(unresolved_vertices, max_hops);
-        if (single_cycle_candidates.size() == before) {
-            break;
-        }
-    }
-}
-
 
 // ============================================================================
 // Sub-routine: Report isovertex computation statistics
@@ -2244,7 +2068,7 @@ static void report_isovertex_statistics(const IsovertexComputationStats& stats) 
  * @brief Compute isovertex positions for all cycles around active Delaunay vertices.
  *
  * This is the main entry point for Step 9 of the Delaunay-based VDC algorithm.
- * The computation proceeds in three stages:
+ * The computation proceeds in two stages:
  *
  *   Stage 1 (initialize_cycle_isovertices):
  *     Compute initial positions for all active vertices.
@@ -2254,10 +2078,6 @@ static void report_isovertex_statistics(const IsovertexComputationStats& stats) 
  *   Stage 2 (resolve_multicycle_self_intersections):
  *     Iteratively resolve self-intersections on multi-cycle vertices.
  *     Uses the PositionMultiIsov separation tests first, then a heuristic fallback search.
- *
- *   Stage 3 (cleanup_single_cycle_self_intersections):
- *     Targeted cleanup of single-cycle vertices near modified vertices.
- *     Checks vertices within 2 hops of modified multi-cycle vertices.
  *
  * @param dt The Delaunay triangulation with cycles computed.
  * @param grid The scalar field grid.
@@ -2290,14 +2110,8 @@ void compute_cycle_isovertices(
     // ========================================================================
     // Stage 2: Resolve self-intersections on multi-cycle vertices.
     // ========================================================================
-    std::vector<Vertex_handle> modified_vertices = resolve_multicycle_self_intersections(
+    resolve_multicycle_self_intersections(
         dt, grid, isovalue, cell_by_index, multi_cycle_vertices, stats);
-
-    // ========================================================================
-    // Stage 3: Targeted cleanup of single-cycle vertices near modified multi-cycle vertices that might be affected.
-    // ========================================================================
-    cleanup_single_cycle_self_intersections(
-        dt, grid, isovalue, cell_by_index, modified_vertices, stats);
 
     // ========================================================================
     // Report final statistics.
