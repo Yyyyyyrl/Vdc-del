@@ -232,6 +232,9 @@ int main(int argc, char* argv[]) {
     DelaunayIsosurface iso_surface;
     generate_isosurface_triangles(dt, iso_surface);
 
+    // Set vertex scale from physical spacing for correct output with non-uniform grids
+    iso_surface.vertex_scale = {grid.physical_spacing[0], grid.physical_spacing[1], grid.physical_spacing[2]};
+
     std::cout << "  Generated " << iso_surface.num_vertices() << " vertices\n";
     std::cout << "  Generated " << iso_surface.num_triangles() << " triangles\n";
 

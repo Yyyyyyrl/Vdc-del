@@ -28,10 +28,11 @@ void write_off_delaunay(const std::string &filename, const DelaunayIsosurface &i
     size_t num_faces = iso_surface.triangles.size();
     out << num_vertices << " " << num_faces << " 0\n";
 
-    // Write vertices with high precision
+    // Write vertices with high precision, scaled to physical coordinates
     out << std::fixed << std::setprecision(8);
+    const auto& scale = iso_surface.vertex_scale;
     for (const auto& v : iso_surface.isovertices) {
-        out << v.x() << " " << v.y() << " " << v.z() << "\n";
+        out << (v.x() * scale[0]) << " " << (v.y() * scale[1]) << " " << (v.z() * scale[2]) << "\n";
     }
 
     // Write faces (triangles)
@@ -74,10 +75,11 @@ void write_ply_delaunay(const std::string &filename, const DelaunayIsosurface &i
     out << "property list uchar int vertex_indices\n";
     out << "end_header\n";
 
-    // Write vertices with high precision
+    // Write vertices with high precision, scaled to physical coordinates
     out << std::fixed << std::setprecision(8);
+    const auto& scale = iso_surface.vertex_scale;
     for (const auto& v : iso_surface.isovertices) {
-        out << v.x() << " " << v.y() << " " << v.z() << "\n";
+        out << (v.x() * scale[0]) << " " << (v.y() * scale[1]) << " " << (v.z() * scale[2]) << "\n";
     }
 
     // Write faces (triangles)
