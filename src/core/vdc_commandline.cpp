@@ -7,7 +7,7 @@
 //! Prints the help message for the program.
 void print_help()
 {
-    std::cout << "Usage: vdc [OPTIONS] <isovalue> <(nhdr/nrrd) raw data file path>\n\n";
+    std::cout << "Usage: vdc-del [OPTIONS] <isovalue> <(nhdr/nrrd) raw data file path>\n\n";
     std::cout << "OPTIONS:\n";
     std::cout << "  -o {output_filename}        : Specify output filename (default: derived from input filename).\n";
     std::cout << "  -off                        : Generate output in .off format (default).\n";
@@ -18,6 +18,7 @@ void print_help()
     std::cout << "  -multi_isov                 : Use multi iso-vertices mode (default).\n";
     std::cout << "  -single_isov                : Use single iso-vertices mode.\n";
     std::cout << "  -position_delv_on_isov      : Position Delaunay vertices on isosurface vertices instead of cube iso-crossings.\n";
+    std::cout << "  -terse                      : Print only the number of vertices/triangles and the output file.\n";
     std::cout << "  -timing_stats               : Print timing statistics after the run.\n";
     std::cout << "  -debug                      : Enable debug logging ([DEBUG]/[ISO]/[ISO-MATCH]/[CYC-MOD]).\n";
     std::cout << "  -no_modcyc                  : Disable modify-cycles pass (enabled by default).\n";
@@ -80,6 +81,10 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         else if (arg == "-position_delv_on_isov")
         {
             vp.position_delv_on_isov = true; // Place Delaunay vertices at isosurface vertex locations.
+        }
+        else if (arg == "-terse")
+        {
+            vp.terse = true; // Reduce output: only print vertex/triangle counts and output file.
         }
         else if (arg == "-help")
         {

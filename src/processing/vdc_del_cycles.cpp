@@ -2714,7 +2714,7 @@ ModifyCyclesResult modify_cycles_pass(Delaunay& dt) {
         }
     }
 
-    if (result.total_flips > 0) {
+    if (indicator && result.total_flips > 0) {
         std::cout << "  ModCyc: " << result.total_flips << " edge flips ("
                   << result.iterations << " iterations)" << std::endl;
     }

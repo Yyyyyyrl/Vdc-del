@@ -11,14 +11,16 @@
 /*!
  * @param filename The output file path.
  * @param iso_surface The isosurface container providing vertices and triangles.
+ * @return `true` on success.
  */
-void write_off_delaunay(const std::string &filename, const DelaunayIsosurface &iso_surface);
+bool write_off_delaunay(const std::string &filename, const DelaunayIsosurface &iso_surface);
 
 //! @brief Writes a DelaunayIsosurface mesh in PLY format.
 /*!
  * @param filename The output file path.
  * @param iso_surface The isosurface container providing vertices and triangles.
+ * @return `true` on success.
  */
-void write_ply_delaunay(const std::string &filename, const DelaunayIsosurface &iso_surface);
+bool write_ply_delaunay(const std::string &filename, const DelaunayIsosurface &iso_surface);
 
 #endif // VDC_IO_H

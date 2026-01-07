@@ -4,17 +4,18 @@
 #include "vdc_io.h"
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <vector>
 
 // ============================================================================
 // OFF Format Output
 // ============================================================================
 
-void write_off_delaunay(const std::string &filename, const DelaunayIsosurface &iso_surface) {
+bool write_off_delaunay(const std::string &filename, const DelaunayIsosurface &iso_surface) {
     std::ofstream out(filename);
     if (!out.is_open()) {
         std::cerr << "Error: Could not open file " << filename << " for writing." << std::endl;
-        return;
+        return false;
     }
 
     std::vector<char> buffer(8 * 1024 * 1024);
@@ -41,20 +42,18 @@ void write_off_delaunay(const std::string &filename, const DelaunayIsosurface &i
     }
 
     out.close();
-
-    std::cout << "Wrote " << num_vertices << " vertices and "
-              << num_faces << " triangles to " << filename << std::endl;
+    return true;
 }
 
 // ============================================================================
 // PLY Format Output
 // ============================================================================
 
-void write_ply_delaunay(const std::string &filename, const DelaunayIsosurface &iso_surface) {
+bool write_ply_delaunay(const std::string &filename, const DelaunayIsosurface &iso_surface) {
     std::ofstream out(filename);
     if (!out.is_open()) {
         std::cerr << "Error: Could not open file " << filename << " for writing." << std::endl;
-        return;
+        return false;
     }
 
     std::vector<char> buffer(8 * 1024 * 1024);
@@ -88,7 +87,5 @@ void write_ply_delaunay(const std::string &filename, const DelaunayIsosurface &i
     }
 
     out.close();
-
-    std::cout << "Wrote " << num_vertices << " vertices and "
-              << num_faces << " triangles to " << filename << std::endl;
+    return true;
 }

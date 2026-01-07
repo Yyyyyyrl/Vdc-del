@@ -31,36 +31,43 @@ void print_header() {
 
 //! @brief Main entry point
 int main(int argc, char* argv[]) {
-    print_header();
-
     // ========================================================================
     // Step 1: Parse command-line arguments
     // ========================================================================
     VdcParam param;
     parse_arguments(argc, argv, param);
 
+    indicator = !param.terse;
+
     TimingStats::getInstance().startTimer("Total", "");
 
-    std::cout << "Input file: " << param.file_path << "\n";
-    std::cout << "Isovalue: " << param.isovalue << "\n";
-    std::cout << "Output format: " << param.output_format << "\n\n";
+    if (!param.terse) {
+        print_header();
+        std::cout << "Input file: " << param.file_path << "\n";
+        std::cout << "Isovalue: " << param.isovalue << "\n";
+        std::cout << "Output format: " << param.output_format << "\n\n";
+    }
 
     // ========================================================================
     // Step 2: Load grid data
     // ========================================================================
     TimingStats::getInstance().startTimer("LoadGrid", "Total");
-    std::cout << "Loading grid data...\n";
+    if (!param.terse) {
+        std::cout << "Loading grid data...\n";
+    }
 
     UnifiedGrid grid = load_nrrd_data(param.file_path);
 
-    std::cout << "  Grid dimensions: "
-              << grid.num_cells[0] << " x "
-              << grid.num_cells[1] << " x "
-              << grid.num_cells[2] << "\n";
-    std::cout << "  Grid spacing: "
-              << grid.spacing[0] << " x "
-              << grid.spacing[1] << " x "
-              << grid.spacing[2] << "\n";
+    if (!param.terse) {
+        std::cout << "  Grid dimensions: "
+                  << grid.num_cells[0] << " x "
+                  << grid.num_cells[1] << " x "
+                  << grid.num_cells[2] << "\n";
+        std::cout << "  Grid spacing: "
+                  << grid.spacing[0] << " x "
+                  << grid.spacing[1] << " x "
+                  << grid.spacing[2] << "\n";
+    }
 
     TimingStats::getInstance().stopTimer("LoadGrid", "Total");
 
@@ -69,33 +76,43 @@ int main(int argc, char* argv[]) {
     // ========================================================================
     if (param.supersample && param.supersample_r > 1) {
         TimingStats::getInstance().startTimer("Supersample", "Total");
-        std::cout << "\nSupersampling by factor " << param.supersample_r << "...\n";
+        if (!param.terse) {
+            std::cout << "\nSupersampling by factor " << param.supersample_r << "...\n";
+        }
 
         grid = supersample_grid(grid, param.supersample_r);
 
-        std::cout << "  New grid dimensions: "
-                  << grid.num_cells[0] << " x "
-                  << grid.num_cells[1] << " x "
-                  << grid.num_cells[2] << "\n";
+        if (!param.terse) {
+            std::cout << "  New grid dimensions: "
+                      << grid.num_cells[0] << " x "
+                      << grid.num_cells[1] << " x "
+                      << grid.num_cells[2] << "\n";
+        }
 
         TimingStats::getInstance().stopTimer("Supersample", "Total");
     }
 
     if (grid.boundary_crosses_isovalue(param.isovalue)) {
         grid.zero_boundary_shell();
-        std::cout << "[INFO] Clamped boundary voxels to minimum scalar value.\n";
+        if (!param.terse) {
+            std::cout << "[INFO] Clamped boundary voxels to minimum scalar value.\n";
+        }
     }
 
     // ========================================================================
     // Step 4: Find active cubes
     // ========================================================================
     TimingStats::getInstance().startTimer("FindActiveCubes", "Total");
-    std::cout << "\nFinding active cubes...\n";
+    if (!param.terse) {
+        std::cout << "\nFinding active cubes...\n";
+    }
 
     std::vector<Cube> activeCubes;
     find_active_cubes(grid, param.isovalue, activeCubes);
 
-    std::cout << "  Found " << activeCubes.size() << " active cubes\n";
+    if (!param.terse) {
+        std::cout << "  Found " << activeCubes.size() << " active cubes\n";
+    }
 
     TimingStats::getInstance().stopTimer("FindActiveCubes", "Total");
 
@@ -109,14 +126,18 @@ int main(int argc, char* argv[]) {
     // ========================================================================
     if (param.sep) {
         TimingStats::getInstance().startTimer("Separation", "Total");
-        std::cout << "\nSeparating active cubes (sep_dist=" << param.sep_dist
-                  << ", sep_split=" << param.sep_split << ")...\n";
+        if (!param.terse) {
+            std::cout << "\nSeparating active cubes (sep_dist=" << param.sep_dist
+                      << ", sep_split=" << param.sep_split << ")...\n";
+        }
 
         std::vector<Cube> separated = separate_active_cubes(
             activeCubes, grid, param.isovalue, param.sep_dist, param.sep_split);
         activeCubes.swap(separated);
 
-        std::cout << "  Remaining cubes after separation: " << activeCubes.size() << "\n";
+        if (!param.terse) {
+            std::cout << "  Remaining cubes after separation: " << activeCubes.size() << "\n";
+        }
         TimingStats::getInstance().stopTimer("Separation", "Total");
 
         if (activeCubes.empty()) {
@@ -129,7 +150,9 @@ int main(int argc, char* argv[]) {
     // Step 5: Construct Delaunay triangulation
     // ========================================================================
     TimingStats::getInstance().startTimer("Delaunay", "Total");
-    std::cout << "\nConstructing Delaunay triangulation...\n";
+    if (!param.terse) {
+        std::cout << "\nConstructing Delaunay triangulation...\n";
+    }
 
     // Create grid facets for dummy points at boundaries
     std::vector<std::vector<GridFacets>> grid_facets = create_grid_facets(activeCubes);
@@ -148,8 +171,10 @@ int main(int argc, char* argv[]) {
     Delaunay dt;
     construct_delaunay_triangulation(dt, grid, grid_facets, param, cubeCenters);
 
-    std::cout << "  Delaunay vertices: " << dt.number_of_vertices() << "\n";
-    std::cout << "  Delaunay cells: " << dt.number_of_finite_cells() << "\n";
+    if (!param.terse) {
+        std::cout << "  Delaunay vertices: " << dt.number_of_vertices() << "\n";
+        std::cout << "  Delaunay cells: " << dt.number_of_finite_cells() << "\n";
+    }
 
     // Store per-site isosurface sample points in vertex info.
     // `info().index` is assigned by `construct_delaunay_triangulation` and matches
@@ -171,7 +196,9 @@ int main(int argc, char* argv[]) {
     // Step 6: Compute cell circumcenters and scalar values
     // ========================================================================
     TimingStats::getInstance().startTimer("CellProcessing", "Total");
-    std::cout << "\nComputing cell circumcenters and scalars...\n";
+    if (!param.terse) {
+        std::cout << "\nComputing cell circumcenters and scalars...\n";
+    }
 
     compute_cell_circumcenters_and_scalars(dt, grid, param.isovalue);
 
@@ -181,7 +208,9 @@ int main(int argc, char* argv[]) {
     // Step 7: Mark isosurface facets
     // ========================================================================
     TimingStats::getInstance().startTimer("MarkFacets", "Total");
-    std::cout << "Marking isosurface facets...\n";
+    if (!param.terse) {
+        std::cout << "Marking isosurface facets...\n";
+    }
 
     mark_isosurface_facets(dt);
 
@@ -191,7 +220,9 @@ int main(int argc, char* argv[]) {
     // Step 8: Mark active vertices
     // ========================================================================
     TimingStats::getInstance().startTimer("MarkVertices", "Total");
-    std::cout << "Marking active vertices...\n";
+    if (!param.terse) {
+        std::cout << "Marking active vertices...\n";
+    }
 
     mark_active_vertices(dt);
 
@@ -201,7 +232,9 @@ int main(int argc, char* argv[]) {
     // Step 9: Compute facet cycles around active vertices
     // ========================================================================
     TimingStats::getInstance().startTimer("CycleDetection", "Total");
-    std::cout << "\nComputing facet cycles...\n";
+    if (!param.terse) {
+        std::cout << "\nComputing facet cycles...\n";
+    }
 
     compute_facet_cycles(dt);
 
@@ -216,7 +249,9 @@ int main(int argc, char* argv[]) {
     // Step 10: Compute cycle isovertices
     // ========================================================================
     TimingStats::getInstance().startTimer("IsovertexComputation", "Total");
-    std::cout << "Computing isovertex positions...\n";
+    if (!param.terse) {
+        std::cout << "Computing isovertex positions...\n";
+    }
 
     compute_cycle_isovertices(
         dt, grid, param.isovalue, param.position_delv_on_isov);
@@ -227,7 +262,9 @@ int main(int argc, char* argv[]) {
     // Step 11: Generate triangles
     // ========================================================================
     TimingStats::getInstance().startTimer("TriangleGeneration", "Total");
-    std::cout << "\nGenerating isosurface triangles...\n";
+    if (!param.terse) {
+        std::cout << "\nGenerating isosurface triangles...\n";
+    }
 
     DelaunayIsosurface iso_surface;
     generate_isosurface_triangles(dt, iso_surface);
@@ -235,8 +272,13 @@ int main(int argc, char* argv[]) {
     // Set vertex scale from physical spacing for correct output with non-uniform grids
     iso_surface.vertex_scale = {grid.physical_spacing[0], grid.physical_spacing[1], grid.physical_spacing[2]};
 
-    std::cout << "  Generated " << iso_surface.num_vertices() << " vertices\n";
-    std::cout << "  Generated " << iso_surface.num_triangles() << " triangles\n";
+    const size_t num_vertices = iso_surface.num_vertices();
+    const size_t num_triangles = iso_surface.num_triangles();
+
+    if (!param.terse) {
+        std::cout << "  Generated " << num_vertices << " vertices\n";
+        std::cout << "  Generated " << num_triangles << " triangles\n";
+    }
 
     TimingStats::getInstance().stopTimer("TriangleGeneration", "Total");
 
@@ -258,12 +300,15 @@ int main(int argc, char* argv[]) {
         output_filename = basename + "_del." + param.output_format;
     }
 
-    std::cout << "\nWriting output to " << output_filename << "...\n";
+    if (!param.terse) {
+        std::cout << "\nWriting output to " << output_filename << "...\n";
+    }
 
+    bool wrote_ok = false;
     if (param.output_format == "ply") {
-        write_ply_delaunay(output_filename, iso_surface);
+        wrote_ok = write_ply_delaunay(output_filename, iso_surface);
     } else {
-        write_off_delaunay(output_filename, iso_surface);
+        wrote_ok = write_off_delaunay(output_filename, iso_surface);
     }
 
     TimingStats::getInstance().stopTimer("Output", "Total");
@@ -272,6 +317,19 @@ int main(int argc, char* argv[]) {
     // Print timing statistics if requested
     // ========================================================================
     TimingStats::getInstance().stopTimer("Total", "");
+
+    if (!wrote_ok) {
+        return 1;
+    }
+
+    if (param.terse) {
+        std::cout << num_vertices << " isosurface vertices. "
+                  << num_triangles << " isosurface triangles.\n";
+        std::cout << "Wrote output to file: " << output_filename << "\n";
+        return 0;
+    }
+
+    std::cout << "Wrote output to file: " << output_filename << "\n";
 
     if (param.timing_stats) {
         std::cout << "\n";

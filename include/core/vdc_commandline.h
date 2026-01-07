@@ -22,6 +22,7 @@ struct VdcParam {
     bool multi_isov;               //!< Flag to enable multi-isosurface mode.
     bool supersample;              //!< Flag to enable supersampling of the input data.
     bool position_delv_on_isov = false; //!< Flag to position Delaunay vertices on isosurface vertices
+    bool terse = false;            //!< Guard: print only vertices/triangles and output file
     bool timing_stats = false;     //!< Guard: print timing statistics at the end of the run
     bool refine_small_angles = false; //!< Guard: enable facet-centric surface refinement
     bool refine_min_angle_enabled = false; //!< Guard: enable min-angle-driven refinement
@@ -45,6 +46,7 @@ struct VdcParam {
           multi_isov(true),
           supersample(false),
           position_delv_on_isov(false),
+          terse(false),
           timing_stats(false),
           refine_small_angles(false),
           refine_min_angle_enabled(false),
@@ -70,6 +72,7 @@ struct VdcParam {
         out << "  Multi isov: " << (multi_isov ? "true" : "false") << "\n";
         out << "  Supersample: " << (supersample ? "true" : "false") << "\n";
         out << "  Position DelV on IsoV: " << (position_delv_on_isov ? "true" : "false") << "\n";
+        out << "  Terse: " << (terse ? "true" : "false") << "\n";
         out << "  Timing stats: " << (timing_stats ? "true" : "false") << "\n";
         out << "  Supersample r: " << supersample_r << "\n";
         out << "  Refine small angles: " << (refine_small_angles ? "true" : "false") << "\n";

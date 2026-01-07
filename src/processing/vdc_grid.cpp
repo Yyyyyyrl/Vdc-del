@@ -1,5 +1,6 @@
 #include "processing/vdc_grid.h"
 #include "core/vdc_timing.h"
+#include "core/vdc_debug.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -324,16 +325,25 @@ UnifiedGrid load_nrrd_data(const std::string &file_path)
     const int grid_nx = grid.num_cells[0];
     const int grid_ny = grid.num_cells[1];
     const int grid_nz = grid.num_cells[2];
-    std::cout << "Grid dimensions: " << grid_nx << "x" << grid_ny << "x" << grid_nz << "\n";
-    std::cout << "Physical spacing: dx=" << grid.physical_spacing[0] << ", dy=" << grid.physical_spacing[1] << ", dz=" << grid.physical_spacing[2] << "\n";
-    std::cout << "Internal spacing (grid units): dx=" << grid.spacing[0] << ", dy=" << grid.spacing[1] << ", dz=" << grid.spacing[2] << "\n";
     const float phys_max_x = grid.min_coord[0] + (grid_nx - 1) * grid.physical_spacing[0];
     const float phys_max_y = grid.min_coord[1] + (grid_ny - 1) * grid.physical_spacing[1];
     const float phys_max_z = grid.min_coord[2] + (grid_nz - 1) * grid.physical_spacing[2];
-    std::cout << "Bounds (grid units): [" << grid.min_coord[0] << ", " << grid.max_coord[0] << "] x ["
-              << grid.min_coord[1] << ", " << grid.max_coord[1] << "] x [" << grid.min_coord[2] << ", " << grid.max_coord[2] << "]\n";
-    std::cout << "Bounds (physical): [" << grid.min_coord[0] << ", " << phys_max_x << "] x ["
-              << grid.min_coord[1] << ", " << phys_max_y << "] x [" << grid.min_coord[2] << ", " << phys_max_z << "]\n";
+
+    if (indicator) {
+        std::cout << "Grid dimensions: " << grid_nx << "x" << grid_ny << "x" << grid_nz << "\n";
+        std::cout << "Physical spacing: dx=" << grid.physical_spacing[0]
+                  << ", dy=" << grid.physical_spacing[1]
+                  << ", dz=" << grid.physical_spacing[2] << "\n";
+        std::cout << "Internal spacing (grid units): dx=" << grid.spacing[0]
+                  << ", dy=" << grid.spacing[1]
+                  << ", dz=" << grid.spacing[2] << "\n";
+        std::cout << "Bounds (grid units): [" << grid.min_coord[0] << ", " << grid.max_coord[0] << "] x ["
+                  << grid.min_coord[1] << ", " << grid.max_coord[1] << "] x ["
+                  << grid.min_coord[2] << ", " << grid.max_coord[2] << "]\n";
+        std::cout << "Bounds (physical): [" << grid.min_coord[0] << ", " << phys_max_x << "] x ["
+                  << grid.min_coord[1] << ", " << phys_max_y << "] x ["
+                  << grid.min_coord[2] << ", " << phys_max_z << "]\n";
+    }
 
     return grid;
 }
