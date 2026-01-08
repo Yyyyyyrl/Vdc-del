@@ -38,8 +38,8 @@ make -j
 - `-supersample {factor}`: Supersample the input data by the given factor
 - `-position_delv_on_isov`: Position Delaunay vertices exactly on the isosurface crossing point
 - `-refine_small_angles`: Insert extra Delaunay sites at circumsphere centers to improve small angles near the isosurface
-- `-min_angle {deg}`: Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold
-- `-max_angle {deg}`: Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is above this threshold
+- `-min_angle {deg}`: Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold (default: 20; also used when `-refine_small_angles` is set without `-min_angle`/`-max_angle`)
+- `-max_angle {deg}`: Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is above this threshold (default: off)
 - `-terse`: Print only the number of vertices/triangles and the output file
 - `-multi_isov`: Use multi iso-vertices mode (default)
 - `-single_isov`: Use single iso-vertices mode
