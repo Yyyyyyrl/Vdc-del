@@ -68,6 +68,7 @@ struct VertexInfo
     // ─── Fields for Delaunay-based isosurface extraction ───────────────────────
     bool active;          //!< true if vertex is incident on any isosurface facet
     Point3 isov;          //!< Isosurface vertex location (if -position_delv_on_isov)
+    bool has_isov_sample; //!< true if `isov` stores a valid isosurface sample point
 
     //! Cycles of isosurface facets around this vertex.
     //! Each cycle is a list of (cell_index, facet_index) pairs representing facets in the cycle.
@@ -77,7 +78,14 @@ struct VertexInfo
     std::vector<Point3> cycle_isovertices;
 
     //! @brief Default constructor
-    VertexInfo() : is_dummy(false), voronoiCellIndex(-1), index(-1), active(false) {}
+    VertexInfo()
+        : is_dummy(false),
+          voronoiCellIndex(-1),
+          index(-1),
+          active(false),
+          isov(Point3(0, 0, 0)),
+          has_isov_sample(false)
+    {}
 
     //! @brief Print vertex info for debugging
     template <typename OSTREAM_TYPE>
@@ -87,6 +95,7 @@ struct VertexInfo
         out << "  Is dummy: " << (is_dummy ? "true" : "false") << "\n";
         out << "  Voronoi cell index: " << voronoiCellIndex << "\n";
         out << "  Active: " << (active ? "true" : "false") << "\n";
+        out << "  Has isov sample: " << (has_isov_sample ? "true" : "false") << "\n";
         out << "  Number of cycles: " << facet_cycles.size() << "\n";
     }
 };

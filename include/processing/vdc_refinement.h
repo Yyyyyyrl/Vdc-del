@@ -11,18 +11,22 @@
 struct RefinementStats
 {
     int iterations_run = 0;            //!< Number of refinement iterations executed.
-    std::size_t candidate_facets = 0;  //!< Facets matching angle criteria.
-    std::size_t bipolar_facets = 0;    //!< Those whose dual Voronoi edge is bipolar.
+    std::size_t candidate_facets = 0; //!< Facets matching angle criteria.
+    std::size_t bipolar_facets = 0;   //!< Those whose dual Voronoi edge is bipolar.
     std::size_t inserted_points = 0;   //!< Points actually inserted into the Delaunay.
 };
 
-//! @brief Refine poorly shaped facets whose dual Voronoi edge is bipolar.
+//! @brief Refine poorly shaped Delaunay facets before extraction.
 /*!
- * Scans finite Delaunay facets, checks their corner angles, and if the
- * dual Voronoi edge is bipolar with respect to the target isovalue, inserts a
- * new vertex snapped to the nearest active cube (or subcell). Refinement
- * triggers when the minimum angle drops below the configured threshold or the
- * maximum angle exceeds the user-provided limit.
+ * Performs a Delaunay refinement pass before isosurface extraction:
+ * scans finite Delaunay facets, checks their corner angles using per-site
+ * isosurface sample points as a proxy for the eventual isosurface triangles,
+ * and for facets whose dual Voronoi edge is bipolar with respect to the target
+ * isovalue inserts new Delaunay sites at the circumsphere centers (cell
+ * circumcenters) of the two tetrahedra incident to that facet.
+ *
+ * Refinement triggers when the minimum corner angle drops below the configured
+ * threshold or the maximum corner angle exceeds the user-provided limit.
  *
  * @param dt Delaunay triangulation to refine (modified in place).
  * @param grid Scalar grid used for value interpolation.

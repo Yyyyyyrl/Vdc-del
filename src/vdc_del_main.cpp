@@ -11,6 +11,7 @@
 #include "processing/vdc_grid.h"
 #include "processing/vdc_func.h"
 #include "processing/vdc_del_isosurface.h"
+#include "processing/vdc_refinement.h"
 #include "processing/vdc_sep_isov.h"
 #include "vdc_io.h"
 
@@ -171,10 +172,7 @@ int main(int argc, char* argv[]) {
     Delaunay dt;
     construct_delaunay_triangulation(dt, grid, grid_facets, param, cubeCenters);
 
-    if (!param.terse) {
-        std::cout << "  Delaunay vertices: " << dt.number_of_vertices() << "\n";
-        std::cout << "  Delaunay cells: " << dt.number_of_finite_cells() << "\n";
-    }
+    TimingStats::getInstance().stopTimer("Delaunay", "Total");
 
     // Store per-site isosurface sample points in vertex info.
     // `info().index` is assigned by `construct_delaunay_triangulation` and matches
@@ -187,10 +185,28 @@ int main(int argc, char* argv[]) {
         const int site_idx = vit->info().index;
         if (site_idx >= 0 && static_cast<size_t>(site_idx) < isoCrossings.size()) {
             vit->info().isov = isoCrossings[static_cast<size_t>(site_idx)];
-        } 
+            vit->info().has_isov_sample = true;
+        }
     }
 
-    TimingStats::getInstance().stopTimer("Delaunay", "Total");
+    if (param.refine_small_angles) {
+        TimingStats::getInstance().startTimer("Refinement", "Total");
+        RefinementStats refine_stats = refine_delaunay(dt, grid, activeCubes, param);
+        TimingStats::getInstance().stopTimer("Refinement", "Total");
+
+        if (!param.terse) {
+            std::cout << "  Refinement iterations: " << refine_stats.iterations_run
+                      << ", candidates: " << refine_stats.candidate_facets
+                      << ", bipolar facets: " << refine_stats.bipolar_facets
+                      << ", inserted sites: " << refine_stats.inserted_points
+                      << "\n";
+        }
+    }
+
+    if (!param.terse) {
+        std::cout << "  Delaunay vertices: " << dt.number_of_vertices() << "\n";
+        std::cout << "  Delaunay cells: " << dt.number_of_finite_cells() << "\n";
+    }
 
     // ========================================================================
     // Step 6: Compute cell circumcenters and scalar values

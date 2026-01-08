@@ -2138,9 +2138,17 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
             // ----------------------------------------------------------------
             // Single cycle vertex: position isovertex at the isosurface sample
             // ----------------------------------------------------------------
-            // The isosurface sample point is stored in vit->info().isov.
-            // When -position_delv_on_isov is enabled, this equals cube_center.
-            isovertices[0] = vit->info().isov;
+            // Prefer the precomputed isosurface sample point when available.
+            // Refinement-inserted vertices may not have a cube-derived sample.
+            if (vit->info().has_isov_sample) {
+                // The isosurface sample point is stored in vit->info().isov.
+                // When -position_delv_on_isov is enabled, this equals cube_center.
+                isovertices[0] = vit->info().isov;
+            } else {
+                // Fallback: compute centroid of Voronoi-edge/isovalue intersections for this cycle.
+                isovertices[0] = compute_centroid_of_voronoi_edge_and_isosurface(
+                    dt, grid, isovalue, vit, cycles[0], cell_by_index);
+            }
             stats.single_cycle_count++;
         } else {
             // ----------------------------------------------------------------

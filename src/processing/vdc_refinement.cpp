@@ -4,17 +4,16 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <utility>
 #include <vector>
-#include <set>
-#include <CGAL/squared_distance_3.h>
 
 #include "processing/vdc_refinement.h"
 #include "core/vdc_utilities.h"
 
 constexpr double kPi = 3.14159265358979323846;
 
-// Helper: Compute minimum and maximum angles of a triangle in degrees
+// Helper: Compute minimum and maximum corner angles of a triangle in degrees.
 static std::pair<double, double> triangle_angle_extents_deg(const Point &a, const Point &b, const Point &c)
 {
     const Vector3 ab = b - a;
@@ -54,7 +53,6 @@ static std::pair<double, double> triangle_angle_extents_deg(const Point &a, cons
     return {min_angle, max_angle};
 }
 
-// Helper: Check if a facet has a dummy vertex
 static bool facet_has_dummy_vertex(const Facet &facet)
 {
     const Cell_handle &cell = facet.first;
@@ -70,68 +68,27 @@ static bool facet_has_dummy_vertex(const Facet &facet)
     return false;
 }
 
-// Helper: Get dual segment from facet
-static bool dual_as_segment(const Delaunay &dt, const Facet &facet, Segment3 &out_segment)
+static bool cell_has_dummy_vertex(const Cell_handle &cell)
 {
-    Object dual_obj = dt.dual(facet);
-    return CGAL::assign(out_segment, dual_obj);
+    for (int i = 0; i < 4; ++i)
+    {
+        if (cell->vertex(i)->info().is_dummy)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
-// Helper: Check if segment is bipolar
 static bool is_bipolar_segment(const Segment3 &seg, const UnifiedGrid &grid, float isovalue)
 {
     const Point &p0 = seg.source();
     const Point &p1 = seg.target();
-    // Use trilinear interpolation to get values at endpoints
-    float v0 = trilinear_interpolate(adjust_outside_bound_points(p0, grid, p0, p1), grid);
-    float v1 = trilinear_interpolate(adjust_outside_bound_points(p1, grid, p0, p1), grid);
+    const float v0 = trilinear_interpolate(adjust_outside_bound_points(p0, grid, p0, p1), grid);
+    const float v1 = trilinear_interpolate(adjust_outside_bound_points(p1, grid, p0, p1), grid);
     return is_bipolar(v0, v1, isovalue);
 }
 
-// Helper: Find nearest active cube
-static const Cube *find_nearest_active_cube(const std::vector<Cube> &cubes, const Point &p)
-{
-    const Cube *best = nullptr;
-    double best_dist_sq = std::numeric_limits<double>::max();
-    for (const Cube &cube : cubes)
-    {
-        const double dist_sq = CGAL::squared_distance(cube.cubeCenter, p);
-        if (dist_sq < best_dist_sq)
-        {
-            best_dist_sq = dist_sq;
-            best = &cube;
-        }
-    }
-    return best;
-}
-
-// Helper: Snap to subcell center
-static Point snap_to_subcell_center(const Cube &cube, const UnifiedGrid &grid, const Point &target, int resolution)
-{
-    const int res = std::max(1, std::min(3, resolution));
-    const double dx = grid.spacing[0];
-    const double dy = grid.spacing[1];
-    const double dz = grid.spacing[2];
-    const double base_x = cube.indices[0] * dx + grid.min_coord[0];
-    const double base_y = cube.indices[1] * dy + grid.min_coord[1];
-    const double base_z = cube.indices[2] * dz + grid.min_coord[2];
-
-    const auto coord_center = [&](double base, double d, double value) -> double
-    {
-        const double local = (value - base) / d;
-        const double scaled = local * res;
-        int idx = static_cast<int>(std::floor(scaled));
-        idx = std::max(0, std::min(res - 1, idx));
-        const double cell_size = d / static_cast<double>(res);
-        return base + (static_cast<double>(idx) + 0.5) * cell_size;
-    };
-
-    return Point(coord_center(base_x, dx, target.x()),
-                 coord_center(base_y, dy, target.y()),
-                 coord_center(base_z, dz, target.z()));
-}
-
-// Helper: Get next vertex index
 static int next_vertex_index(const Delaunay &dt)
 {
     int next_index = 0;
@@ -142,7 +99,6 @@ static int next_vertex_index(const Delaunay &dt)
     return next_index;
 }
 
-// Helper: Reindex cells
 static void reindex_cells(Delaunay &dt)
 {
     int cell_index = 0;
@@ -169,6 +125,10 @@ RefinementStats refine_delaunay(Delaunay &dt,
     double min_angle_threshold = params.refine_min_surface_angle_deg;
     double max_angle_threshold = params.refine_max_surface_angle_deg;
 
+    if (!use_min_angle && !use_max_angle)
+    {
+        use_min_angle = true;
+    }
     if (use_min_angle && min_angle_threshold <= 0.0)
     {
         min_angle_threshold = 20.0;
@@ -177,43 +137,46 @@ RefinementStats refine_delaunay(Delaunay &dt,
     {
         max_angle_threshold = 120.0;
     }
-    if (!use_min_angle && !use_max_angle)
-    {
-        use_max_angle = true;
-        if (max_angle_threshold <= 0.0)
-        {
-            max_angle_threshold = 120.0;
-        }
-    }
-    const int insert_resolution = params.refine_insert_resolution;
+
     const float isovalue = params.isovalue;
-
     const int max_iterations = 10;
-
+    const std::size_t max_insert_per_iteration = 500;
     int vertex_index = next_vertex_index(dt);
 
     for (int iter = 0; iter < max_iterations; ++iter)
     {
-        std::vector<Point> candidates;
-        std::set<Point> unique_candidates; // To avoid duplicates in one pass
+        std::vector<std::pair<double, Point>> candidates;
 
-        // 1. Scan all finite tetrahedra (via facets)
         for (auto fit = dt.finite_facets_begin(); fit != dt.finite_facets_end(); ++fit)
         {
             const Facet &facet = *fit;
-            
-            // Skip facets with dummy vertices
             if (facet_has_dummy_vertex(facet))
             {
                 continue;
             }
 
-            // Get facet vertices
-            const Cell_handle &cell = facet.first;
+            const Cell_handle &cell_a = facet.first;
             const int facet_index = facet.second;
-            const Point p0 = cell->vertex(CellInfo::FacetVertexIndex(facet_index, 0))->point();
-            const Point p1 = cell->vertex(CellInfo::FacetVertexIndex(facet_index, 1))->point();
-            const Point p2 = cell->vertex(CellInfo::FacetVertexIndex(facet_index, 2))->point();
+            const Cell_handle cell_b = cell_a->neighbor(facet_index);
+            if (dt.is_infinite(cell_b))
+            {
+                continue;
+            }
+            if (cell_has_dummy_vertex(cell_a) || cell_has_dummy_vertex(cell_b))
+            {
+                continue;
+            }
+
+            const Vertex_handle v0 = cell_a->vertex(CellInfo::FacetVertexIndex(facet_index, 0));
+            const Vertex_handle v1 = cell_a->vertex(CellInfo::FacetVertexIndex(facet_index, 1));
+            const Vertex_handle v2 = cell_a->vertex(CellInfo::FacetVertexIndex(facet_index, 2));
+
+            // Angle proxy: use per-site isosurface samples when available.
+            // This targets small angles in the eventual isosurface triangles while still
+            // applying refinement as pure Delaunay point insertions (tetrahedron circumcenters).
+            const Point p0 = v0->info().has_isov_sample ? v0->info().isov : v0->point();
+            const Point p1 = v1->info().has_isov_sample ? v1->info().isov : v1->point();
+            const Point p2 = v2->info().has_isov_sample ? v2->info().isov : v2->point();
 
             const auto [min_angle, max_angle] = triangle_angle_extents_deg(p0, p1, p2);
             bool trigger = false;
@@ -229,43 +192,39 @@ RefinementStats refine_delaunay(Delaunay &dt,
             {
                 trigger = (max_angle >= max_angle_threshold);
             }
+
             if (!trigger)
             {
                 continue;
             }
-
             ++stats.candidate_facets;
 
-            // Compute dual Voronoi edge
-            Segment3 dual_segment;
-            if (!dual_as_segment(dt, facet, dual_segment))
-            {
-                
-                continue;
-            }
-
-            // Check if dual edge is bipolar
+            const Point circumcenter_a = cell_a->circumcenter();
+            const Point circumcenter_b = cell_b->circumcenter();
+            const Segment3 dual_segment(circumcenter_a, circumcenter_b);
             if (!is_bipolar_segment(dual_segment, grid, isovalue))
             {
                 continue;
             }
-            
             ++stats.bipolar_facets;
 
-            // Find insertion point
-            Point centroid = CGAL::midpoint(dual_segment.source(), dual_segment.target());
-            const Cube *nearest_cube = find_nearest_active_cube(active_cubes, centroid);
-
-            if (nearest_cube)
+            double severity = min_angle;
+            if (!use_min_angle && use_max_angle)
             {
-                Point p_ref = snap_to_subcell_center(*nearest_cube, grid, centroid, insert_resolution);
-                
-                // Avoid inserting duplicates in the same batch
-                if (unique_candidates.find(p_ref) == unique_candidates.end())
-                {
-                    unique_candidates.insert(p_ref);
-                    candidates.push_back(p_ref);
-                }
+                severity = 180.0 - max_angle;
+            }
+            else if (use_min_angle && use_max_angle)
+            {
+                severity = std::min(min_angle, 180.0 - max_angle);
+            }
+
+            if (is_point_inside_grid(circumcenter_a, grid))
+            {
+                candidates.emplace_back(severity, circumcenter_a);
+            }
+            if (is_point_inside_grid(circumcenter_b, grid))
+            {
+                candidates.emplace_back(severity, circumcenter_b);
             }
         }
 
@@ -274,26 +233,48 @@ RefinementStats refine_delaunay(Delaunay &dt,
             break;
         }
 
-        // 2. Insert points
+        std::sort(candidates.begin(), candidates.end(),
+                  [](const auto &a, const auto &b) { return a.first < b.first; });
+
+        std::set<Point> unique_candidates;
         std::size_t inserted_this_iter = 0;
-        for (const auto &p : candidates)
+
+        for (const auto &[severity, p] : candidates)
         {
+            (void)severity;
+            if (unique_candidates.size() >= max_insert_per_iteration)
+            {
+                break;
+            }
+            if (!unique_candidates.insert(p).second)
+            {
+                continue;
+            }
+
             Vertex_handle vh = dt.insert(p);
+            if (vh == Vertex_handle())
+            {
+                continue;
+            }
+            if (vh->info().index >= 0)
+            {
+                continue;
+            }
 
             vh->info().index = vertex_index++;
             vh->info().is_dummy = false;
             vh->info().voronoiCellIndex = -1;
-            
+            vh->info().has_isov_sample = false;
+
             ++inserted_this_iter;
             ++stats.inserted_points;
         }
-        
-        stats.iterations_run++;
-        
+
         if (inserted_this_iter == 0)
         {
             break;
         }
+        ++stats.iterations_run;
     }
 
     reindex_cells(dt);

@@ -18,6 +18,9 @@ void print_help()
     std::cout << "  -multi_isov                 : Use multi iso-vertices mode (default).\n";
     std::cout << "  -single_isov                : Use single iso-vertices mode.\n";
     std::cout << "  -position_delv_on_isov      : Position Delaunay vertices on isosurface vertices instead of cube iso-crossings.\n";
+    std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
+    std::cout << "  -min_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold.\n";
+    std::cout << "  -max_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is above this threshold.\n";
     std::cout << "  -terse                      : Print only the number of vertices/triangles and the output file.\n";
     std::cout << "  -timing_stats               : Print timing statistics after the run.\n";
     std::cout << "  -debug                      : Enable debug logging ([DEBUG]/[ISO]/[ISO-MATCH]/[CYC-MOD]).\n";
@@ -81,6 +84,22 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         else if (arg == "-position_delv_on_isov")
         {
             vp.position_delv_on_isov = true; // Place Delaunay vertices at isosurface vertex locations.
+        }
+        else if (arg == "-refine_small_angles")
+        {
+            vp.refine_small_angles = true;
+        }
+        else if (arg == "-min_angle" && i + 1 < argc)
+        {
+            vp.refine_min_surface_angle_deg = std::atof(argv[++i]);
+            vp.refine_min_angle_enabled = true;
+            vp.refine_small_angles = true;
+        }
+        else if (arg == "-max_angle" && i + 1 < argc)
+        {
+            vp.refine_max_surface_angle_deg = std::atof(argv[++i]);
+            vp.refine_max_angle_enabled = true;
+            vp.refine_small_angles = true;
         }
         else if (arg == "-terse")
         {
@@ -165,6 +184,19 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         if (!vp.mod_cyc)
         {
             vp.output_filename += "_no-mod-cyc";
+        }
+
+        if (vp.refine_small_angles)
+        {
+            vp.output_filename += "_refine";
+            if (vp.refine_min_angle_enabled)
+            {
+                vp.output_filename += "-min" + std::to_string(static_cast<int>(vp.refine_min_surface_angle_deg));
+            }
+            if (vp.refine_max_angle_enabled)
+            {
+                vp.output_filename += "-max" + std::to_string(static_cast<int>(vp.refine_max_surface_angle_deg));
+            }
         }
 
         // Add file format extension.
