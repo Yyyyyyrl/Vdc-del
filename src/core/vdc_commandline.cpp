@@ -19,8 +19,11 @@ void print_help()
     std::cout << "  -single_isov                : Use single iso-vertices mode.\n";
     std::cout << "  -position_delv_on_isov      : Position Delaunay vertices on isosurface vertices instead of cube iso-crossings.\n";
     std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
+    std::cout << "                               Default trigger: min_angle=20 deg, max_angle=off.\n";
     std::cout << "  -min_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold.\n";
+    std::cout << "                               Default: 20 (also used when -refine_small_angles is set without -min_angle/-max_angle).\n";
     std::cout << "  -max_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is above this threshold.\n";
+    std::cout << "                               Default: off.\n";
     std::cout << "  -terse                      : Print only the number of vertices/triangles and the output file.\n";
     std::cout << "  -timing_stats               : Print timing statistics after the run.\n";
     std::cout << "  -debug                      : Enable debug logging ([DEBUG]/[ISO]/[ISO-MATCH]/[CYC-MOD]).\n";
