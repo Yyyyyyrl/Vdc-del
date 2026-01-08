@@ -37,11 +37,15 @@ make -j
 - `-sep_split {K}`: Number of splits (K) per axis, using a refined grid of factor K+1 (default 0 = no split)
 - `-supersample {factor}`: Supersample the input data by the given factor
 - `-position_delv_on_isov`: Position Delaunay vertices exactly on the isosurface crossing point
+- `-refine_small_angles`: Insert extra Delaunay sites at circumsphere centers to improve small angles near the isosurface
+- `-min_angle {deg}`: Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold
+- `-max_angle {deg}`: Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is above this threshold
+- `-terse`: Print only the number of vertices/triangles and the output file
 - `-multi_isov`: Use multi iso-vertices mode (default)
 - `-single_isov`: Use single iso-vertices mode
-- `-summary_stats`: Print summary statistics after the run
 - `-timing_stats`: Print timing statistics after the run
 - `-debug`: Enable debug logging
+- `-no_modcyc`: Disable modify-cycles pass (enabled by default)
 - `-help`: Print help message
 
 ### Examples
@@ -59,6 +63,16 @@ PLY output with supersampling x2:
 Single iso-vertices mode with separation:
 ```bash
 ./vdc-del -single_isov -sep_dist 2 -sep_split 2 70.5 ./data/volvis/fuel.nhdr
+```
+
+Terse output (useful for batch runs):
+```bash
+./vdc-del -terse 70.5 ./data/volvis/fuel.nhdr
+```
+
+Angle-based refinement (adds extra Delaunay sites near the isosurface):
+```bash
+./vdc-del -refine_small_angles -min_angle 20 70.5 ./data/volvis/fuel.nhdr
 ```
 
 ## File Structure
