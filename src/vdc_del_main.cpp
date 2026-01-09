@@ -269,8 +269,13 @@ int main(int argc, char* argv[]) {
         std::cout << "Computing isovertex positions...\n";
     }
 
+    const CycleIsovertexOptions isovertex_options{
+        param.position_multi_isov_on_delv,
+        param.reposition_multi_isovA
+    };
+
     compute_cycle_isovertices(
-        dt, grid, param.isovalue, param.position_delv_on_isov);
+        dt, grid, param.isovalue, param.position_delv_on_isov, isovertex_options);
 
     TimingStats::getInstance().stopTimer("IsovertexComputation", "Total");
 

@@ -18,6 +18,8 @@ void print_help()
     std::cout << "  -multi_isov                 : Use multi iso-vertices mode (default).\n";
     std::cout << "  -single_isov                : Use single iso-vertices mode.\n";
     std::cout << "  -position_delv_on_isov      : Position Delaunay vertices on isosurface vertices instead of cube iso-crossings.\n";
+    std::cout << "  -position_multi_isov_on_delv: Debug only. For multi-cycle vertices, place all iso-vertices at the Delaunay vertex (disables repositioning).\n";
+    std::cout << "  -reposition_multi_isovA     : Reposition multi-cycle iso-vertices using only hyperplane separation + reflection (no multi-radius/rotations/fibonacci).\n";
     std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
     std::cout << "                               Default trigger: min_angle=20 deg, max_angle=off.\n";
     std::cout << "  -min_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold.\n";
@@ -87,6 +89,14 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         else if (arg == "-position_delv_on_isov")
         {
             vp.position_delv_on_isov = true; // Place Delaunay vertices at isosurface vertex locations.
+        }
+        else if (arg == "-position_multi_isov_on_delv")
+        {
+            vp.position_multi_isov_on_delv = true;
+        }
+        else if (arg == "-reposition_multi_isovA")
+        {
+            vp.reposition_multi_isovA = true;
         }
         else if (arg == "-refine_small_angles")
         {

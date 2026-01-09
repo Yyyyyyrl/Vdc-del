@@ -1405,6 +1405,43 @@ static Point reflect_at_radius(const Point& center, const Point& p, double radiu
 
 static Vector3 rotate_axis_angle(const Vector3& vec, const Vector3& axis_unit, double angle_rad);
 
+static bool try_separate_cycle_pair_positions_A(
+    const Delaunay& dt,
+    const VertexStarCells& star,
+    Vertex_handle v0,
+    const CycleBoundaryInfo& cycleA,
+    const CycleBoundaryInfo& cycleB,
+    const Point& vposA,
+    const Point& vposB,
+    Point& new_vposA,
+    Point& new_vposB
+) {
+    new_vposA = vposA;
+    new_vposB = vposB;
+
+    // First check: do current positions already satisfy bisecting plane separation?
+    if (bisecting_plane_separates_cycle_boundaries(cycleA, cycleB, vposA, vposB)) {
+        return true;
+    }
+
+    const Point center = v0->point();
+
+    // Try simple reflection through center (PositionMultiIsov.txt: find_vertex_positions_separating_cycles)
+    const Point vposB2 = reflect_through_center(center, vposA);
+    if (passes_cycle_barrier_orientation_test(dt, star, v0, cycleA.facets, cycleB.facets, vposB2)) {
+        new_vposB = vposB2;
+        return true;
+    }
+
+    const Point vposA2 = reflect_through_center(center, vposB);
+    if (passes_cycle_barrier_orientation_test(dt, star, v0, cycleB.facets, cycleA.facets, vposA2)) {
+        new_vposA = vposA2;
+        return true;
+    }
+
+    return false;
+}
+
 static bool try_separate_cycle_pair_positions(
     const Delaunay& dt,
     const VertexStarCells& star,
@@ -1770,7 +1807,8 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
     const UnifiedGrid& grid,
-    const std::vector<Cell_handle>& cell_by_index
+    const std::vector<Cell_handle>& cell_by_index,
+    bool reposition_multi_isovA
 ) {
     const auto& cycles = v->info().facet_cycles;
     const int num_cycles = static_cast<int>(cycles.size());
@@ -1788,8 +1826,11 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
 
     const VertexStarCells star = gather_vertex_star_cells(dt, v);
 
-    // Compute base radius for multi-radius search
-    const double base_radius = compute_sphere_radius(v, dt, grid);
+    double base_radius = 0.0;
+    if (!reposition_multi_isovA) {
+        // Compute base radius for multi-radius search
+        base_radius = compute_sphere_radius(v, dt, grid);
+    }
 
     bool any_changed = false;
     const double change_eps2 = 1e-6;
@@ -1803,20 +1844,34 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                 Point newA = cycle_isovertices[static_cast<size_t>(a)];
                 Point newB = cycle_isovertices[static_cast<size_t>(b)];
 
-                if (!try_separate_cycle_pair_positions(
-                        dt,
-                        star,
-                        v,
-                        cycle_data[static_cast<size_t>(a)],
-                        cycle_data[static_cast<size_t>(b)],
-                        cycle_isovertices[static_cast<size_t>(a)],
-                        cycle_isovertices[static_cast<size_t>(b)],
-                        base_radius,
-                        newA,
-                        newB)) {
-                    continue;
+                if (reposition_multi_isovA) {
+                    if (!try_separate_cycle_pair_positions_A(
+                            dt,
+                            star,
+                            v,
+                            cycle_data[static_cast<size_t>(a)],
+                            cycle_data[static_cast<size_t>(b)],
+                            cycle_isovertices[static_cast<size_t>(a)],
+                            cycle_isovertices[static_cast<size_t>(b)],
+                            newA,
+                            newB)) {
+                        continue;
+                    }
+                } else {
+                    if (!try_separate_cycle_pair_positions(
+                            dt,
+                            star,
+                            v,
+                            cycle_data[static_cast<size_t>(a)],
+                            cycle_data[static_cast<size_t>(b)],
+                            cycle_isovertices[static_cast<size_t>(a)],
+                            cycle_isovertices[static_cast<size_t>(b)],
+                            base_radius,
+                            newA,
+                            newB)) {
+                        continue;
+                    }
                 }
-
 
                 if (squared_distance(newA, cycle_isovertices[static_cast<size_t>(a)]) > change_eps2) {
                     cycle_isovertices[static_cast<size_t>(a)] = newA;
@@ -1846,7 +1901,7 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
 
     // If the sufficient-condition separation tests fail, try a small deterministic
     // candidate set
-    if (num_cycles == 2) {
+    if (!reposition_multi_isovA && num_cycles == 2) {
         cycle_isovertices = baseline_positions;
 
         const Point center = v->point();
@@ -1961,7 +2016,8 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     const Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    const std::vector<Cell_handle>& cell_by_index
+    const std::vector<Cell_handle>& cell_by_index,
+    bool reposition_multi_isovA
 ) {
     auto trace_selfi_vertex = [&](int idx) -> bool {
         static int cached = std::numeric_limits<int>::min();
@@ -2009,7 +2065,8 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     }
 
     const ResolutionResult separation_result =
-        try_resolve_multicycle_by_cycle_separation_tests(v, cycle_isovertices, dt, grid, cell_by_index);
+        try_resolve_multicycle_by_cycle_separation_tests(
+            v, cycle_isovertices, dt, grid, cell_by_index, reposition_multi_isovA);
     if (separation_result.status == ResolutionStatus::RESOLVED) {
         DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
                     << " resolved by geometric separation (cycles=" << num_cycles << ").");
@@ -2025,6 +2082,14 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     if (trace) {
         DEBUG_PRINT("[DEL-SELFI-TRACE] Vertex " << v->info().index
                     << ": geometric separation failed.");
+    }
+
+    if (reposition_multi_isovA) {
+        if (trace) {
+            DEBUG_PRINT("[DEL-SELFI-TRACE] Vertex " << v->info().index
+                        << ": skipping candidate search (-reposition_multi_isovA).");
+        }
+        return separation_result;
     }
 
     // Not solvable by geometric separation, try fibonacci uniform distribution of vertices among the sphere
@@ -2113,7 +2178,8 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
     const UnifiedGrid& grid,
     float isovalue,
     const std::vector<Cell_handle>& cell_by_index,
-    IsovertexComputationStats& stats
+    IsovertexComputationStats& stats,
+    bool position_multi_isov_on_delv
 ) {
     std::vector<Vertex_handle> multi_cycle_vertices;
     
@@ -2160,12 +2226,18 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
             //   1. Computing the centroid of Voronoi edge / isosurface intersections
             //   2. Projecting this centroid onto a sphere around the Delaunay site
             // This provides directional separation between cycles.
-            const double sphere_radius = compute_sphere_radius(vit, dt, grid);
-            for (size_t c = 0; c < cycles.size(); ++c) {
-                Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
-                    dt, grid, isovalue, vit, cycles[c], cell_by_index);
+            if (position_multi_isov_on_delv) {
+                for (size_t c = 0; c < cycles.size(); ++c) {
+                    isovertices[c] = cube_center;
+                }
+            } else {
+                const double sphere_radius = compute_sphere_radius(vit, dt, grid);
+                for (size_t c = 0; c < cycles.size(); ++c) {
+                    Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
+                        dt, grid, isovalue, vit, cycles[c], cell_by_index);
 
-                isovertices[c] = project_to_sphere(centroid, cube_center, sphere_radius);
+                    isovertices[c] = project_to_sphere(centroid, cube_center, sphere_radius);
+                }
             }
             multi_cycle_vertices.push_back(vit);
             stats.multi_cycle_count++;
@@ -2185,7 +2257,8 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
     float isovalue,
     const std::vector<Cell_handle>& cell_by_index,
     const std::vector<Vertex_handle>& multi_cycle_vertices,
-    IsovertexComputationStats& stats
+    IsovertexComputationStats& stats,
+    bool reposition_multi_isovA
 ) {
     std::vector<Vertex_handle> modified_multi_cycle_vertices;
     std::unordered_set<int> modified_multi_cycle_indices;
@@ -2209,7 +2282,7 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
             auto& isovertices = vh->info().cycle_isovertices;
 
             const ResolutionResult result = resolve_multicycle_self_intersection_at_vertex(
-                vh, isovertices, dt, grid, isovalue, cell_by_index);
+                vh, isovertices, dt, grid, isovalue, cell_by_index, reposition_multi_isovA);
 
             update_resolution_stats(result, stats, any_changed,
                 pass_detected, pass_resolved, pass_unresolved);
@@ -2304,7 +2377,8 @@ void compute_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    bool position_on_isov
+    bool position_on_isov,
+    const CycleIsovertexOptions& options
 ) {
     DEBUG_PRINT("[DEL-ISOV] Computing isovertex positions for cycles...");
     
@@ -2321,13 +2395,20 @@ void compute_cycle_isovertices(
     // Stage 1: Compute initial isovertex positions for all active vertices.
     // ========================================================================
     std::vector<Vertex_handle> multi_cycle_vertices = initialize_cycle_isovertices(
-        dt, grid, isovalue, cell_by_index, stats);
+        dt, grid, isovalue, cell_by_index, stats, options.position_multi_isov_on_delv);
+
+    if (options.position_multi_isov_on_delv) {
+        DEBUG_PRINT("[DEL-ISOV] Skipping multi-cycle repositioning (-position_multi_isov_on_delv).");
+        report_isovertex_statistics(stats);
+        return;
+    }
 
     // ========================================================================
     // Stage 2: Resolve self-intersections on multi-cycle vertices.
     // ========================================================================
     resolve_multicycle_self_intersections(
-        dt, grid, isovalue, cell_by_index, multi_cycle_vertices, stats);
+        dt, grid, isovalue, cell_by_index, multi_cycle_vertices, stats,
+        options.reposition_multi_isovA);
 
     // ========================================================================
     // Report final statistics.

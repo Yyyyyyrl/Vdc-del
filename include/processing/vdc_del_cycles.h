@@ -191,6 +191,14 @@ struct IsovertexComputationStats {
 // ============================================================================
 
 /**
+ * @brief Options controlling multi-cycle isovertex positioning.
+ */
+struct CycleIsovertexOptions {
+    bool position_multi_isov_on_delv = false; ///< Debug only: place all multi-cycle isovertices at the Delaunay vertex.
+    bool reposition_multi_isovA = false;      ///< Use only hyperplane separation + reflection (no candidate search).
+};
+
+/**
  * @brief Compute cycles of isosurface facets around each active vertex.
  *
  * For each active Delaunay vertex, finds all isosurface facets incident on it
@@ -211,12 +219,14 @@ void compute_facet_cycles(Delaunay& dt);
  * @param grid The scalar field grid.
  * @param isovalue The isovalue threshold.
  * @param position_on_isov If true, Delaunay sites are on isosurface samples.
+ * @param options Controls multi-cycle isovertex positioning behavior.
  */
 void compute_cycle_isovertices(
     Delaunay& dt,
     const UnifiedGrid& grid,
     float isovalue,
-    bool position_on_isov
+    bool position_on_isov,
+    const CycleIsovertexOptions& options
 );
 
 // ============================================================================

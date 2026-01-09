@@ -22,6 +22,8 @@ struct VdcParam {
     bool multi_isov;               //!< Flag to enable multi-isosurface mode.
     bool supersample;              //!< Flag to enable supersampling of the input data.
     bool position_delv_on_isov = false; //!< Flag to position Delaunay vertices on isosurface vertices
+    bool position_multi_isov_on_delv = false; //!< Debug: place all multi-cycle isovertices at the Delaunay vertex
+    bool reposition_multi_isovA = false; //!< Reposition multi isovertices using only hyperplane separation and reflection
     bool terse = false;            //!< Guard: print only vertices/triangles and output file
     bool timing_stats = false;     //!< Guard: print timing statistics at the end of the run
     bool refine_small_angles = false; //!< Guard: enable facet-centric surface refinement
@@ -46,6 +48,8 @@ struct VdcParam {
           multi_isov(true),
           supersample(false),
           position_delv_on_isov(false),
+          position_multi_isov_on_delv(false),
+          reposition_multi_isovA(false),
           terse(false),
           timing_stats(false),
           refine_small_angles(false),
@@ -72,6 +76,8 @@ struct VdcParam {
         out << "  Multi isov: " << (multi_isov ? "true" : "false") << "\n";
         out << "  Supersample: " << (supersample ? "true" : "false") << "\n";
         out << "  Position DelV on IsoV: " << (position_delv_on_isov ? "true" : "false") << "\n";
+        out << "  Position multi IsoV on DelV: " << (position_multi_isov_on_delv ? "true" : "false") << "\n";
+        out << "  Reposition multi IsoV A: " << (reposition_multi_isovA ? "true" : "false") << "\n";
         out << "  Terse: " << (terse ? "true" : "false") << "\n";
         out << "  Timing stats: " << (timing_stats ? "true" : "false") << "\n";
         out << "  Supersample r: " << supersample_r << "\n";
