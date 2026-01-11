@@ -42,19 +42,11 @@ ISOVALUE_INCREMENT="0.1"
 # Modify these ranges based on your needs (all use ISOVALUE_INCREMENT)
 DATASET_RANGES=(
     "aneurysm:10:200"
-    "engine:50:150"
-    "fuel:30:120"
-    "bonsai:20:100"
-    "silicium:80:160"
-    "neghip:50:150"
-    "lobster:10:80"
-    "marschnerlobb:50:150"
-    "skull:20:100"
 )
 
 # Configurations: name and flags
-CONFIG_NAMES=("default" "sep2_dist2" "sep2_dist3" "sep3_dist4")
-CONFIG_FLAGS=("" "-sep_split 2 -sep_dist 2" "-sep_split 2 -sep_dist 3" "-sep_split 3 -sep_dist 4")
+CONFIG_NAMES=("sep2_dist2")
+CONFIG_FLAGS=("-sep_split 2 -sep_dist 2")
 
 # Filtering options
 FILTER_DATASET=""
@@ -526,11 +518,16 @@ for dataset in "${DATASETS_TO_TEST[@]}"; do
                 
                 # Angles
                 if ($11 ~ /^[0-9.]+$/) {
-                    if (min_angle_min == "" || $11 < min_angle_min) { min_angle_min = $11; min_angle_iso = $3 }
-                    if (min_angle_max == "" || $11 > min_angle_max) min_angle_max = $11
+                    min_angle_sum += $11
+                    min_angle_count++
+                    if (min_angle_min == "" || $11 < min_angle_min) { min_angle_min = $11; min_angle_min_iso = $3 }
+                    if (min_angle_max == "" || $11 > min_angle_max) { min_angle_max = $11; min_angle_max_iso = $3 }
                 }
                 if ($12 ~ /^[0-9.]+$/) {
-                    if (max_angle_max == "" || $12 > max_angle_max) { max_angle_max = $12; max_angle_iso = $3 }
+                    max_angle_sum += $12
+                    max_angle_count++
+                    if (max_angle_max == "" || $12 > max_angle_max) { max_angle_max = $12; max_angle_max_iso = $3 }
+                    if (max_angle_min == "" || $12 < max_angle_min) { max_angle_min = $12; max_angle_min_iso = $3 }
                 }
                 
                 # Non-manifold
@@ -552,12 +549,36 @@ for dataset in "${DATASETS_TO_TEST[@]}"; do
                     if (tri_max == "" || $6 > tri_max) tri_max = $6
                 }
                 
-                # Angle buckets
-                if ($13 ~ /^[0-9]+$/) angle5_sum += $13
-                if ($14 ~ /^[0-9]+$/) angle10_sum += $14
-                if ($15 ~ /^[0-9]+$/) angle15_sum += $15
-                if ($16 ~ /^[0-9]+$/) angle16_sum += $16
-                if ($17 ~ /^[0-9]+$/) angle30_sum += $17
+                # Angle buckets: count tests where min_angle <= threshold
+                if ($11 ~ /^[0-9.]+$/) {
+                    if ($11 <= 5) angle5_tests++
+                    if ($11 <= 10) angle10_tests++
+                    if ($11 <= 15) angle15_tests++
+                    if ($11 <= 20) angle20_tests++
+                    if ($11 <= 30) angle30_tests++
+                }
+                
+                # Angle buckets: sum polygon counts and track max
+                if ($13 ~ /^[0-9]+$/) {
+                    angle5_sum += $13
+                    if (angle5_max == "" || $13 > angle5_max) { angle5_max = $13; angle5_max_iso = $3 }
+                }
+                if ($14 ~ /^[0-9]+$/) {
+                    angle10_sum += $14
+                    if (angle10_max == "" || $14 > angle10_max) { angle10_max = $14; angle10_max_iso = $3 }
+                }
+                if ($15 ~ /^[0-9]+$/) {
+                    angle15_sum += $15
+                    if (angle15_max == "" || $15 > angle15_max) { angle15_max = $15; angle15_max_iso = $3 }
+                }
+                if ($16 ~ /^[0-9]+$/) {
+                    angle20_sum += $16
+                    if (angle20_max == "" || $16 > angle20_max) { angle20_max = $16; angle20_max_iso = $3 }
+                }
+                if ($17 ~ /^[0-9]+$/) {
+                    angle30_sum += $17
+                    if (angle30_max == "" || $17 > angle30_max) { angle30_max = $17; angle30_max_iso = $3 }
+                }
             }
             END {
                 if (count > 0) {
@@ -579,21 +600,20 @@ for dataset in "${DATASETS_TO_TEST[@]}"; do
                     printf "  Total sum:               %d\n", selfi_sum
                     printf "\n"
                     printf "Angles:\n"
-                    printf "  Worst min angle:         %.2f (at iso=%s)\n", min_angle_min, min_angle_iso
-                    printf "  Best min angle:          %.2f\n", min_angle_max
-                    printf "  Worst max angle:         %.2f (at iso=%s)\n", max_angle_max, max_angle_iso
+                    printf "  Min angle: worst=%.2f (iso=%s), best=%.2f (iso=%s), avg=%.2f\n", min_angle_min, min_angle_min_iso, min_angle_max, min_angle_max_iso, (min_angle_count > 0 ? min_angle_sum / min_angle_count : 0)
+                    printf "  Max angle: worst=%.2f (iso=%s), best=%.2f (iso=%s), avg=%.2f\n", max_angle_max, max_angle_max_iso, max_angle_min, max_angle_min_iso, (max_angle_count > 0 ? max_angle_sum / max_angle_count : 0)
                     printf "\n"
                     printf "Non-manifold totals:\n"
                     printf "  Edges sum:               %d\n", nm_edges_sum
                     printf "  Vertices sum:            %d\n", nm_verts_sum
                     printf "  Orientation failures:    %d\n", orient_fail
                     printf "\n"
-                    printf "Angle bucket totals (polygons with angle <= N):\n"
-                    printf "  <=5:   %d\n", angle5_sum
-                    printf "  <=10:  %d\n", angle10_sum
-                    printf "  <=15:  %d\n", angle15_sum
-                    printf "  <=20:  %d\n", angle16_sum
-                    printf "  <=30:  %d\n", angle30_sum
+                    printf "Angle Bucket Statistics (polygons with angle <= N):\n"
+                    printf "  <=5:   tests=%d, total=%d, max=%d (iso=%s)\n", angle5_tests, angle5_sum, angle5_max, angle5_max_iso
+                    printf "  <=10:  tests=%d, total=%d, max=%d (iso=%s)\n", angle10_tests, angle10_sum, angle10_max, angle10_max_iso
+                    printf "  <=15:  tests=%d, total=%d, max=%d (iso=%s)\n", angle15_tests, angle15_sum, angle15_max, angle15_max_iso
+                    printf "  <=20:  tests=%d, total=%d, max=%d (iso=%s)\n", angle20_tests, angle20_sum, angle20_max, angle20_max_iso
+                    printf "  <=30:  tests=%d, total=%d, max=%d (iso=%s)\n", angle30_tests, angle30_sum, angle30_max, angle30_max_iso
                 }
             }' "$csv_file"
         } > "$summary_file"
