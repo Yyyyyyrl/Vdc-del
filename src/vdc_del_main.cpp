@@ -349,7 +349,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        const std::filesystem::path base = repo_root / "analysis" / "simple_multi_failures" / "trace";
+        const std::filesystem::path base = "simple_multi_failures_trace";
         const std::filesystem::path input_path(param.file_path);
         const std::string dataset = input_path.stem().string().empty() ? "dataset" : input_path.stem().string();
         const std::string iso = format_float_for_path(param.isovalue);
