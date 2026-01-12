@@ -140,7 +140,6 @@ enum class ResolutionStatus {
 enum class ResolutionStrategy {
     NONE,                  ///< No strategy applied
     GEOMETRIC_SEPARATION,  ///< Bisecting plane / reflection separation tests
-    FIBONACCI_SPHERE       ///< Fibonacci spherical distribution
 };
 
 /**
@@ -184,7 +183,6 @@ struct IsovertexComputationStats {
 
     // Per-strategy counts
     int64_t strat_geometric_separation = 0;  ///< Uses of GEOMETRIC_SEPARATION strategy
-    int64_t strat_fibonacci_sphere = 0;      ///< Uses of FIBONACCI_SPHERE strategy
 };
 
 // ============================================================================

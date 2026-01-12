@@ -939,6 +939,14 @@ static bool triangles_have_nontrivial_intersection(
     TriIntersectionTrace* trace_out
 );
 
+static int count_self_intersection_pairs(
+    Vertex_handle v,
+    const std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt,
+    const std::vector<Cell_handle>& cell_by_index,
+    int max_count = std::numeric_limits<int>::max()
+);
+
 static bool triangles_have_nontrivial_intersection(
     const Triangle_3& t1,
     const Triangle_3& t2
@@ -1102,6 +1110,66 @@ static bool triangles_have_nontrivial_intersection(
         *trace_out = trace;
     }
     return false;
+}
+
+static int count_self_intersection_pairs(
+    Vertex_handle v,
+    const std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt,
+    const std::vector<Cell_handle>& cell_by_index,
+    int max_count
+) {
+    if (max_count <= 0) {
+        return 0;
+    }
+
+    const auto& cycles = v->info().facet_cycles;
+    const size_t num_cycles = cycles.size();
+    if (num_cycles < 1) {
+        return 0;
+    }
+
+    std::vector<std::vector<Triangle_3>> cycle_triangles(num_cycles);
+    for (size_t c = 0; c < num_cycles; ++c) {
+        if (c >= cycle_isovertices.size()) {
+            break;
+        }
+        cycle_triangles[c] = collect_cycle_triangles(
+            dt, v, static_cast<int>(c), cycle_isovertices[c], cell_by_index);
+    }
+
+    int count = 0;
+
+    for (size_t c = 0; c < num_cycles; ++c) {
+        const auto& tris = cycle_triangles[c];
+        for (size_t i = 0; i < tris.size(); ++i) {
+            for (size_t j = i + 1; j < tris.size(); ++j) {
+                if (triangles_have_nontrivial_intersection(tris[i], tris[j])) {
+                    ++count;
+                    if (count >= max_count) {
+                        return count;
+                    }
+                }
+            }
+        }
+    }
+
+    for (size_t c0 = 0; c0 < num_cycles; ++c0) {
+        for (size_t c1 = c0 + 1; c1 < num_cycles; ++c1) {
+            for (const auto& t0 : cycle_triangles[c0]) {
+                for (const auto& t1 : cycle_triangles[c1]) {
+                    if (triangles_have_nontrivial_intersection(t0, t1)) {
+                        ++count;
+                        if (count >= max_count) {
+                            return count;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return count;
 }
 
 bool check_self_intersection(
@@ -1711,9 +1779,7 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    const UnifiedGrid& grid,
     const std::vector<Cell_handle>& cell_by_index,
-    bool reposition_multi_isovA,
     std::vector<Point>* geometric_attempt_positions_out
 );
 
@@ -1912,7 +1978,6 @@ static void dump_reposition_multi_isovA_trace_case(
     Vertex_handle v,
     const std::vector<Point>& baseline_positions,
     const Delaunay& dt,
-    const UnifiedGrid& grid,
     const std::vector<Cell_handle>& cell_by_index
 ) {
     dump_simple_multi_failure_stage(out_dir, v, baseline_positions, dt, cell_by_index, "baseline");
@@ -1924,8 +1989,7 @@ static void dump_reposition_multi_isovA_trace_case(
 
     const Point center = v->point();
 
-    // For 2-cycle vertices, also dump the two "diametric through the other cycle" reflections
-    // that the A-only procedure considers.
+    // For 2-cycle vertices, dump the deterministic A-only reflection candidates.
     if (num_cycles == 2) {
         {
             std::vector<Point> cand = baseline_positions;
@@ -1937,6 +2001,28 @@ static void dump_reposition_multi_isovA_trace_case(
             cand[1] = reflect_through_center(center, baseline_positions[0]);
             dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_B");
         }
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[0] = reflect_through_center(center, baseline_positions[0]);
+            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self0");
+        }
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[1] = reflect_through_center(center, baseline_positions[1]);
+            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self1");
+        }
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[0] = reflect_through_center(center, baseline_positions[0]);
+            cand[1] = reflect_through_center(center, baseline_positions[1]);
+            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self_both");
+        }
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[0] = reflect_through_center(center, baseline_positions[1]);
+            cand[1] = reflect_through_center(center, baseline_positions[0]);
+            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_cross_both");
+        }
     } else {
         // For 3+ cycles, dump per-cycle self-reflections as a simple candidate set.
         for (int c = 0; c < num_cycles; ++c) {
@@ -1945,6 +2031,19 @@ static void dump_reposition_multi_isovA_trace_case(
             std::ostringstream stage;
             stage << "reflect_cycle" << c;
             dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, stage.str().c_str());
+        }
+
+        // Also dump the cross-reflection candidates used by the A-only deterministic fallback.
+        for (int a = 0; a < num_cycles; ++a) {
+            for (int b = 0; b < num_cycles; ++b) {
+                if (a == b) continue;
+                std::vector<Point> cand = baseline_positions;
+                cand[static_cast<size_t>(a)] =
+                    reflect_through_center(center, baseline_positions[static_cast<size_t>(b)]);
+                std::ostringstream stage;
+                stage << "reflect_cycle" << a << "_from" << b;
+                dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, stage.str().c_str());
+            }
         }
     }
 
@@ -1957,9 +2056,7 @@ static void dump_reposition_multi_isovA_trace_case(
             v,
             attempt,
             dt,
-            grid,
             cell_by_index,
-            /*reposition_multi_isovA=*/true,
             &attempt_out);
         if (!attempt_out.empty()) {
             dump_simple_multi_failure_stage(out_dir, v, attempt_out, dt, cell_by_index, "pairwise_attempt");
@@ -2174,31 +2271,6 @@ static Point reflect_through_center(const Point& center, const Point& p) {
         2.0 * center.z() - p.z());
 }
 
-/**
- * @brief Reflect a point through center and project to specified radius.
- *
- * The reflected point is placed on the opposite side of center,
- * at the specified distance (radius) from center.
- */
-static Point reflect_at_radius(const Point& center, const Point& p, double radius) {
-    const double dx = center.x() - p.x();
-    const double dy = center.y() - p.y();
-    const double dz = center.z() - p.z();
-    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (dist < 1e-12) {
-        // p is at center, return arbitrary point at radius
-        return Point(center.x() + radius, center.y(), center.z());
-    }
-    // Unit direction from p to center, then continue to opposite side at radius
-    const double scale = radius / dist;
-    return Point(
-        center.x() + dx * scale,
-        center.y() + dy * scale,
-        center.z() + dz * scale);
-}
-
-static Vector3 rotate_axis_angle(const Vector3& vec, const Vector3& axis_unit, double angle_rad);
-
 static bool try_separate_cycle_pair_positions_A(
     Vertex_handle v0,
     const CycleBoundaryInfo& cycleA,
@@ -2306,354 +2378,6 @@ static bool try_separate_cycle_pair_positions_A(
     return true;
 }
 
-static bool try_separate_cycle_pair_positions(
-    Vertex_handle v0,
-    const CycleBoundaryInfo& cycleA,
-    const CycleBoundaryInfo& cycleB,
-    const Point& vposA,
-    const Point& vposB,
-    double base_radius,
-    Point& new_vposA,
-    Point& new_vposB
-) {
-    new_vposA = vposA;
-    new_vposB = vposB;
-
-    // First check: do current positions already satisfy bisecting plane separation?
-    if (bisecting_plane_separates_cycle_boundaries(cycleA, cycleB, vposA, vposB)) {
-        return true;
-    }
-
-    const Point center = v0->point();
-
-    auto accept_if_separated = [&](const Point& candA, const Point& candB) -> bool {
-        if (!bisecting_plane_separates_cycle_boundaries(cycleA, cycleB, candA, candB)) {
-            return false;
-        }
-        new_vposA = candA;
-        new_vposB = candB;
-        return true;
-    };
-
-    // Try original radius first (simple reflection through center).
-    if (accept_if_separated(vposA, reflect_through_center(center, vposA))) {
-        return true;
-    }
-    if (accept_if_separated(reflect_through_center(center, vposB), vposB)) {
-        return true;
-    }
-
-    // Try multiple radius scales for reflection
-    const double radius_scales[] = {0.5, 0.75, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0};
-    for (double scale : radius_scales) {
-        const double r = base_radius * scale;
-
-        // Try reflecting A to get new position for B at scaled radius
-        const Point vposBr = reflect_at_radius(center, vposA, r);
-        if (accept_if_separated(vposA, vposBr)) {
-            return true;
-        }
-
-        // Try reflecting B to get new position for A at scaled radius
-        const Point vposAr = reflect_at_radius(center, vposB, r);
-        if (accept_if_separated(vposAr, vposB)) {
-            return true;
-        }
-    }
-
-    // If reflection doesn't yield bisect-plane separation, try changing radius
-    // without changing direction. This preserves the original direction while
-    // increasing geometric separation between the two local fans.
-    {
-        const Vector3 dirA = unit_dir_to_or(center, vposA, Vector3(1, 0, 0));
-        const Vector3 dirB = unit_dir_to_or(center, vposB, Vector3(0, 1, 0));
-        const double scale_trials[] = {1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0};
-        for (double scale : scale_trials) {
-            const double r = base_radius * scale;
-
-            const Point vposBr = center + dirB * r;
-            if (accept_if_separated(vposA, vposBr)) {
-                return true;
-            }
-
-            const Point vposAr = center + dirA * r;
-            if (accept_if_separated(vposAr, vposB)) {
-                return true;
-            }
-        }
-    }
-
-    // As a last resort within the geometric tests, try rotating the diametric direction
-    // (still centered at v0) to satisfy bisect-plane constraints without invoking the
-    // more expensive full self-intersection candidate search.
-    {
-        const Vector3 dirA = unit_dir_to_or(center, vposA, Vector3(1, 0, 0));
-        const Vector3 dirB = unit_dir_to_or(center, vposB, Vector3(0, 1, 0));
-
-        Vector3 axis = vec_cross(dirA, dirB);
-        axis = vec_normalize_or(axis, vec_cross(dirA, Vector3(1, 0, 0)));
-        axis = vec_normalize_or(axis, vec_cross(dirA, Vector3(0, 1, 0)));
-
-        const double angle_trials[] = {
-            M_PI / 12.0, -M_PI / 12.0, // 15 deg
-            M_PI / 6.0,  -M_PI / 6.0,  // 30 deg
-            M_PI / 4.0,  -M_PI / 4.0,  // 45 deg
-            M_PI / 3.0,  -M_PI / 3.0,  // 60 deg
-            M_PI / 2.0,  -M_PI / 2.0   // 90 deg
-        };
-        const double scale_trials[] = {1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0};
-
-        for (double scale : scale_trials) {
-            const double r = base_radius * scale;
-
-            for (double angle : angle_trials) {
-                const Vector3 rotB = vec_normalize_or(
-                    rotate_axis_angle(-dirA, axis, angle), -dirA);
-                const Point vposBr = center + rotB * r;
-                if (accept_if_separated(vposA, vposBr)) {
-                    return true;
-                }
-
-                const Vector3 rotA = vec_normalize_or(
-                    rotate_axis_angle(-dirB, axis, angle), -dirB);
-                const Point vposAr = center + rotA * r;
-                if (accept_if_separated(vposAr, vposB)) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    return false;
-}
-
-
-static uint32_t xorshift32(uint32_t& state) {
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    return state;
-}
-
-static double rand01(uint32_t& state) {
-    return (xorshift32(state) & 0xFFFFFFu) / static_cast<double>(0x1000000u);
-}
-
-static Vector3 rotate_axis_angle(const Vector3& vec, const Vector3& axis_unit, double angle_rad) {
-    const double c = std::cos(angle_rad);
-    const double s = std::sin(angle_rad);
-
-    const Vector3 term0 = vec * c;
-    const Vector3 term1 = vec_cross(axis_unit, vec) * s;
-    const Vector3 term2 = axis_unit * (vec_dot(axis_unit, vec) * (1.0 - c));
-    return term0 + term1 + term2;
-}
-
-struct SphericalCandidateSearch {
-    Vertex_handle v;
-    const Delaunay& dt;
-    const std::vector<Cell_handle>& cell_by_index;
-    const std::vector<Point>& original_positions;
-    double min_sep2 = 0.0;
-
-    bool found_solution = false;
-    double best_cost = std::numeric_limits<double>::infinity();
-    std::vector<Point> best_positions;
-    ResolutionStatus best_status = ResolutionStatus::UNRESOLVED;
-    ResolutionStrategy best_strategy = ResolutionStrategy::NONE;
-
-    bool consider_candidate(
-        const std::vector<Point>& candidate,
-        ResolutionStatus status,
-        ResolutionStrategy strategy
-    ) {
-        if (!have_min_separation(candidate, min_sep2)) {
-            return false;
-        }
-        if (check_self_intersection(v, candidate, dt, cell_by_index)) {
-            return false;
-        }
-
-        const int n = static_cast<int>(candidate.size());
-        double cost = 0.0;
-        for (int i = 0; i < n; ++i) {
-            cost += squared_distance(candidate[i], original_positions[i]);
-        }
-
-        if (!found_solution || cost < best_cost) {
-            found_solution = true;
-            best_cost = cost;
-            best_positions = candidate;
-            best_status = status;
-            best_strategy = strategy;
-            return true;
-        }
-
-        return false;
-    }
-};
-
-static void consider_rotated_fibonacci_candidates(
-    const Point& center,
-    double base_radius,
-    const std::vector<Vector3>& centroid_dirs,
-    SphericalCandidateSearch& search
-) {
-    const int n = static_cast<int>(centroid_dirs.size());
-    if (n < 1) {
-        return;
-    }
-
-    const double golden_angle = M_PI * (3.0 - std::sqrt(5.0));
-    const std::vector<double> fallback_scales = (n == 1)
-        ? std::vector<double>{0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0}
-        : std::vector<double>{3.0, 4.0, 6.0, 8.0, 10.0};
-    const int fallback_attempts = (n == 1) ? 32 : 16;
-
-    for (double s : fallback_scales) {
-        const double r = base_radius * s;
-
-        for (int attempt = 0; attempt < fallback_attempts; ++attempt) {
-            uint32_t prng = static_cast<uint32_t>(search.v->info().index) * 747796405u +
-                            static_cast<uint32_t>(attempt) * 2891336453u + 277803737u;
-
-            const Vector3 axis = vec_normalize_or(
-                Vector3(2.0 * rand01(prng) - 1.0, 2.0 * rand01(prng) - 1.0, 2.0 * rand01(prng) - 1.0),
-                Vector3(1, 0, 0));
-            const double angle = 2.0 * M_PI * rand01(prng);
-
-            // Generate evenly-distributed unit directions.
-            std::vector<Vector3> dirs(n);
-            for (int i = 0; i < n; ++i) {
-                const double t = (static_cast<double>(i) + 0.5) / static_cast<double>(n);
-                const double z = 1.0 - 2.0 * t;
-                const double xy = std::sqrt(std::max(0.0, 1.0 - z * z));
-                const double theta = golden_angle * static_cast<double>(i);
-                const Vector3 base_dir(xy * std::cos(theta), xy * std::sin(theta), z);
-                dirs[i] = vec_normalize_or(rotate_axis_angle(base_dir, axis, angle), base_dir);
-            }
-
-            // Greedy assignment of generated directions to cycles to stay near centroid directions.
-            std::vector<int> assign(n, -1);
-            std::vector<bool> used(n, false);
-            for (int c = 0; c < n; ++c) {
-                double best_score = -std::numeric_limits<double>::infinity();
-                int best_i = -1;
-                for (int i = 0; i < n; ++i) {
-                    if (used[i]) continue;
-                    const double score = vec_dot(dirs[i], centroid_dirs[c]);
-                    if (score > best_score) {
-                        best_score = score;
-                        best_i = i;
-                    }
-                }
-                if (best_i < 0) {
-                    best_i = c;
-                }
-                assign[c] = best_i;
-                used[best_i] = true;
-            }
-
-            std::vector<Point> candidate(n);
-            for (int c = 0; c < n; ++c) {
-                candidate[c] = center + dirs[assign[c]] * r;
-            }
-
-            search.consider_candidate(
-                candidate,
-                ResolutionStatus::RESOLVED,
-                ResolutionStrategy::FIBONACCI_SPHERE);
-
-            if (n == 2) {
-                std::swap(candidate[0], candidate[1]);
-                search.consider_candidate(
-                    candidate,
-                    ResolutionStatus::RESOLVED,
-                    ResolutionStrategy::FIBONACCI_SPHERE);
-            }
-        }
-    }
-}
-
-//! @brief Attempt to resolve a vertex-local self-intersection via spherical candidate search.
-/*!
- * Uses Fibonacci sphere distribution to generate evenly-spaced candidate positions
- * on concentric spheres around the Delaunay site, then greedily assigns directions
- * to match per-cycle centroid directions.
- *
- * @param v The vertex with potential self-intersection
- * @param cycle_isovertices The isovertex positions to modify
- * @param dt The Delaunay triangulation
- * @param grid The volumetric grid
- * @param isovalue The isovalue for centroid computation
- * @param cell_by_index Cell handles indexed by `cell->info().index`
- * @return Resolution status indicating what happened
- */
-static ResolutionResult solve_local_self_intersection_by_spherical_candidate_search(
-    Vertex_handle v,
-    std::vector<Point>& cycle_isovertices,
-    const Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
-    const std::vector<Cell_handle>& cell_by_index
-) {
-    const auto& cycles = v->info().facet_cycles;
-    const Point center = v->point();
-    const int n = static_cast<int>(cycle_isovertices.size());
-
-    if (n < 1) {
-        return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
-    }
-
-    const std::vector<Point> original_positions = cycle_isovertices;
-    const double base_radius = compute_sphere_radius(v, dt, grid);
-
-    // Precompute centroids per-cycle once.
-    std::vector<Point> centroids(n);
-    for (int c = 0; c < n; ++c) {
-        centroids[c] = compute_centroid_of_voronoi_edge_and_isosurface(
-            dt, grid, isovalue, v, cycles[c], cell_by_index);
-    }
-
-    std::vector<Vector3> centroid_dirs(n);
-    for (int i = 0; i < n; ++i) {
-        centroid_dirs[i] = unit_dir_to_or(center, centroids[i], Vector3(1, 0, 0));
-    }
-
-    const double min_sep = std::max(1e-8, base_radius * 1e-3);
-    const double min_sep2 = min_sep * min_sep;
-
-    SphericalCandidateSearch search{v, dt, cell_by_index, original_positions, min_sep2};
-
-    // Use Fibonacci sphere distribution to find non-intersecting positions
-    consider_rotated_fibonacci_candidates(center, base_radius, centroid_dirs, search);
-
-    if (search.found_solution) {
-        cycle_isovertices = search.best_positions;
-        return {search.best_status, search.best_strategy};
-    }
-
-    cycle_isovertices = original_positions;
-
-    DEBUG_PRINT("[DEBUG-UNRESOLVED] Vertex " << v->info().index
-                << " at (" << center.x() << ", " << center.y() << ", " << center.z() << ")"
-                << " has " << n << " cycles, could not resolve self-intersection");
-    for (int i = 0; i < n; ++i) {
-        DEBUG_PRINT("[DEBUG-UNRESOLVED]   Isovertex " << i << ": ("
-                    << cycle_isovertices[i].x() << ", "
-                    << cycle_isovertices[i].y() << ", "
-                    << cycle_isovertices[i].z() << ")");
-        DEBUG_PRINT("[DEBUG-UNRESOLVED]     Cycle " << i << " contains "
-                    << cycles[i].size() << " facets:");
-        for (const auto& fkey : cycles[i]) {
-            DEBUG_PRINT("[DEBUG-UNRESOLVED]       Facet (cell=" << fkey.first
-                        << ", local_idx=" << fkey.second << ")");
-        }
-    }
-
-    return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::NONE};
-}
-
 // ============================================================================
 // Multi-cycle resolution
 // ============================================================================
@@ -2662,9 +2386,7 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    const UnifiedGrid& grid,
     const std::vector<Cell_handle>& cell_by_index,
-    bool reposition_multi_isovA,
     std::vector<Point>* geometric_attempt_positions_out
 ) {
     const auto& cycles = v->info().facet_cycles;
@@ -2681,16 +2403,10 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         cycle_data.push_back(gather_cycle_boundary_info(dt, cell_by_index, v, cycles[c]));
     }
 
-    double base_radius = 0.0;
-    if (!reposition_multi_isovA) {
-        // Compute base radius for multi-radius search
-        base_radius = compute_sphere_radius(v, dt, grid);
-    }
-
     // PositionMultiIsov(A) is intentionally restrictive (diametric reflections only).
     // For 2-cycle vertices, try both reflection directions and pick the one that actually
-    // resolves the in-code self-intersection check (tie-break by minimal movement).
-    if (reposition_multi_isovA && num_cycles == 2) {
+    // resolves (or strictly reduces) the local self-intersection count (tie-break by minimal movement).
+    if (num_cycles == 2) {
         const bool trace = trace_selfi_enabled(v->info().index);
         const Point center = v->point();
 
@@ -2698,61 +2414,133 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
             std::vector<Point> positions;
             const char* label = nullptr;
             double move2 = 0.0;
+            int intersections = std::numeric_limits<int>::max();
         };
 
         std::vector<CandidateA2> candidates;
-        candidates.reserve(2);
+        candidates.reserve(6);
 
         const Point vpos0 = baseline_positions[0];
         const Point vpos1 = baseline_positions[1];
 
-        auto consider_move = [&](const char* label,
-                                 int moved_cycle_index,
-                                 const Point& new_pos) {
+        auto consider_positions = [&](const char* label, std::vector<Point> positions) {
             CandidateA2 cand;
-            cand.positions = baseline_positions;
-            cand.positions[static_cast<size_t>(moved_cycle_index)] = new_pos;
+            cand.positions = std::move(positions);
             cand.label = label;
-            cand.move2 = squared_distance(new_pos, baseline_positions[static_cast<size_t>(moved_cycle_index)]);
+            cand.move2 = 0.0;
+            for (size_t i = 0; i < cand.positions.size() && i < baseline_positions.size(); ++i) {
+                cand.move2 += squared_distance(cand.positions[i], baseline_positions[i]);
+            }
             candidates.push_back(std::move(cand));
         };
 
         // reflect-B: move cycle1 to the diametric position of cycle0
-        consider_move("reflect-B", 1, reflect_through_center(center, vpos0));
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[1] = reflect_through_center(center, vpos0);
+            consider_positions("reflect_B", std::move(cand));
+        }
         // reflect-A: move cycle0 to the diametric position of cycle1
-        consider_move("reflect-A", 0, reflect_through_center(center, vpos1));
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[0] = reflect_through_center(center, vpos1);
+            consider_positions("reflect_A", std::move(cand));
+        }
 
-        CandidateA2* best = nullptr;
+        // Also try self reflections (still diametric through the Delaunay site).
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[0] = reflect_through_center(center, vpos0);
+            consider_positions("reflect_self0", std::move(cand));
+        }
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[1] = reflect_through_center(center, vpos1);
+            consider_positions("reflect_self1", std::move(cand));
+        }
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[0] = reflect_through_center(center, vpos0);
+            cand[1] = reflect_through_center(center, vpos1);
+            consider_positions("reflect_self_both", std::move(cand));
+        }
+        {
+            std::vector<Point> cand = baseline_positions;
+            cand[0] = reflect_through_center(center, vpos1);
+            cand[1] = reflect_through_center(center, vpos0);
+            consider_positions("reflect_cross_both", std::move(cand));
+        }
+
+        const int baseline_intersections = count_self_intersection_pairs(
+            v, baseline_positions, dt, cell_by_index);
+        if (trace) {
+            DEBUG_PRINT("[DEL-SELFI-A2] v=" << v->info().index
+                        << " baseline intersections=" << baseline_intersections);
+        }
+
+        CandidateA2* best_resolved = nullptr;
+        CandidateA2* best_improved = nullptr;
+        CandidateA2* best_any = nullptr;
         for (auto& cand : candidates) {
             const bool bisect_ok = bisecting_plane_separates_cycle_boundaries(
                 cycle_data[0], cycle_data[1], cand.positions[0], cand.positions[1]);
-            const bool still_intersects = check_self_intersection(v, cand.positions, dt, cell_by_index);
+            cand.intersections = count_self_intersection_pairs(
+                v, cand.positions, dt, cell_by_index);
+            const bool resolved = (cand.intersections == 0);
+            const bool improved =
+                (!resolved) && (baseline_intersections > 0) && (cand.intersections < baseline_intersections);
             if (trace) {
                 DEBUG_PRINT("[DEL-SELFI-A2] v=" << v->info().index
                             << " " << cand.label << ": "
                             << "bisect-plane-after=" << (bisect_ok ? "PASS" : "FAIL")
-                            << " " << (still_intersects ? "STILL_INTERSECTS" : "RESOLVED")
+                            << " intersections=" << cand.intersections
+                            << "/" << baseline_intersections
+                            << " "
+                            << (resolved ? "RESOLVED" :
+                                    (improved ? "IMPROVED" : "NO_IMPROVEMENT"))
                             << " move2=" << cand.move2);
             }
-            if (still_intersects) {
+            if (!best_any ||
+                cand.intersections < best_any->intersections ||
+                (cand.intersections == best_any->intersections &&
+                 cand.move2 < best_any->move2)) {
+                best_any = &cand;
+            }
+            if (resolved) {
+                if (!best_resolved || cand.move2 < best_resolved->move2) {
+                    best_resolved = &cand;
+                }
                 continue;
             }
-            if (!best || cand.move2 < best->move2) {
-                best = &cand;
+            if (improved) {
+                if (!best_improved ||
+                    cand.intersections < best_improved->intersections ||
+                    (cand.intersections == best_improved->intersections &&
+                     cand.move2 < best_improved->move2)) {
+                    best_improved = &cand;
+                }
             }
         }
 
-        if (best) {
-            cycle_isovertices = best->positions;
+        if (best_resolved) {
+            cycle_isovertices = best_resolved->positions;
             if (geometric_attempt_positions_out) {
-                *geometric_attempt_positions_out = best->positions;
+                *geometric_attempt_positions_out = best_resolved->positions;
             }
             return {ResolutionStatus::RESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
         }
 
+        if (best_improved) {
+            cycle_isovertices = best_improved->positions;
+            if (geometric_attempt_positions_out) {
+                *geometric_attempt_positions_out = best_improved->positions;
+            }
+            return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
+        }
+
         if (geometric_attempt_positions_out) {
-            if (!candidates.empty()) {
-                *geometric_attempt_positions_out = candidates.front().positions;
+            if (best_any) {
+                *geometric_attempt_positions_out = best_any->positions;
             } else {
                 *geometric_attempt_positions_out = baseline_positions;
             }
@@ -2774,31 +2562,17 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                 Point newA = cycle_isovertices[static_cast<size_t>(a)];
                 Point newB = cycle_isovertices[static_cast<size_t>(b)];
 
-                if (reposition_multi_isovA) {
-                    if (!try_separate_cycle_pair_positions_A(
-                            v,
-                            cycle_data[static_cast<size_t>(a)],
-                            cycle_data[static_cast<size_t>(b)],
-                            a,
-                            b,
-                            cycle_isovertices[static_cast<size_t>(a)],
-                            cycle_isovertices[static_cast<size_t>(b)],
-                            newA,
-                            newB)) {
-                        continue;
-                    }
-                } else {
-                    if (!try_separate_cycle_pair_positions(
-                            v,
-                            cycle_data[static_cast<size_t>(a)],
-                            cycle_data[static_cast<size_t>(b)],
-                            cycle_isovertices[static_cast<size_t>(a)],
-                            cycle_isovertices[static_cast<size_t>(b)],
-                            base_radius,
-                            newA,
-                            newB)) {
-                        continue;
-                    }
+                if (!try_separate_cycle_pair_positions_A(
+                        v,
+                        cycle_data[static_cast<size_t>(a)],
+                        cycle_data[static_cast<size_t>(b)],
+                        a,
+                        b,
+                        cycle_isovertices[static_cast<size_t>(a)],
+                        cycle_isovertices[static_cast<size_t>(b)],
+                        newA,
+                        newB)) {
+                    continue;
                 }
 
                 if (squared_distance(newA, cycle_isovertices[static_cast<size_t>(a)]) > change_eps2) {
@@ -2830,72 +2604,146 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         return {ResolutionStatus::RESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
     }
 
-    // If the sufficient-condition separation tests fail, try a small deterministic
-    // candidate set
-    if (!reposition_multi_isovA && num_cycles == 2) {
-        cycle_isovertices = baseline_positions;
-
+    // If pairwise reflections don't fully resolve, also try per-cycle reflection candidates
+    // (still diametric through the Delaunay site) and keep a candidate that resolves or strictly
+    // reduces the number of local self-intersection pairs.
+        const bool trace = trace_selfi_enabled(v->info().index);
         const Point center = v->point();
-        const Vector3 d0 = unit_dir_to_or(center, baseline_positions[0], Vector3(1, 0, 0));
-        const Vector3 d1 = unit_dir_to_or(center, baseline_positions[1], Vector3(0, 1, 0));
 
-        Vector3 e3 = vec_cross(d0, d1);
-        e3 = vec_normalize_or(e3, vec_cross(d0, Vector3(0, 0, 1)));
-        e3 = vec_normalize_or(e3, vec_cross(d0, Vector3(0, 1, 0)));
-        const Vector3 e2 = vec_normalize_or(vec_cross(e3, d0), Vector3(0, 1, 0));
-
-        auto to_world = [&](double x, double y, double z) -> Vector3 {
-            return vec_normalize_or(d0 * x + e2 * y + e3 * z, d0);
+        struct CandidateAN {
+            std::vector<Point> positions;
+            std::string label;
+            double move2 = 0.0;
+            int intersections = std::numeric_limits<int>::max();
         };
 
-        std::vector<Vector3> dir_pool;
-        dir_pool.reserve(10);
-        dir_pool.push_back(to_world(1, 0, 0));
-        dir_pool.push_back(to_world(-1, 0, 0));
-        dir_pool.push_back(to_world(0, 1, 0));
-        dir_pool.push_back(to_world(0, -1, 0));
-        dir_pool.push_back(to_world(0, 0, 1));
-        dir_pool.push_back(to_world(0, 0, -1));
+        const int baseline_intersections = count_self_intersection_pairs(
+            v, baseline_positions, dt, cell_by_index);
+        if (trace) {
+            DEBUG_PRINT("[DEL-SELFI-A] v=" << v->info().index
+                        << " baseline intersections=" << baseline_intersections);
+        }
 
-        const double inv_sqrt3 = 1.0 / std::sqrt(3.0);
-        dir_pool.push_back(to_world(inv_sqrt3, inv_sqrt3, inv_sqrt3));
-        dir_pool.push_back(to_world(inv_sqrt3, -inv_sqrt3, -inv_sqrt3));
-        dir_pool.push_back(to_world(-inv_sqrt3, inv_sqrt3, -inv_sqrt3));
-        dir_pool.push_back(to_world(-inv_sqrt3, -inv_sqrt3, inv_sqrt3));
+        auto compute_move2 = [&](const std::vector<Point>& pos) -> double {
+            double move2 = 0.0;
+            const size_t n = std::min(pos.size(), baseline_positions.size());
+            for (size_t i = 0; i < n; ++i) {
+                move2 += squared_distance(pos[i], baseline_positions[i]);
+            }
+            return move2;
+        };
 
-        const double min_sep = std::max(1e-8, base_radius * 1e-3);
-        const double min_sep2 = min_sep * min_sep;
-        SphericalCandidateSearch search{v, dt, cell_by_index, baseline_positions, min_sep2};
+        const size_t n_cycles = static_cast<size_t>(num_cycles);
+        const size_t cross_count = (num_cycles > 1) ? (n_cycles * (n_cycles - 1)) : 0;
 
-        const double radius_scales[] = {1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0};
-        for (double scale : radius_scales) {
-            const double r = base_radius * scale;
-            for (size_t i = 0; i < dir_pool.size(); ++i) {
-                for (size_t j = 0; j < dir_pool.size(); ++j) {
-                    if (i == j) {
-                        continue;
-                    }
+        std::vector<CandidateAN> candidates;
+        candidates.reserve(1 + n_cycles + cross_count);
 
-                    std::vector<Point> candidate(2);
-                    candidate[0] = center + dir_pool[i] * r;
-                    candidate[1] = center + dir_pool[j] * r;
-                    search.consider_candidate(
-                        candidate,
-                        ResolutionStatus::RESOLVED,
-                        ResolutionStrategy::GEOMETRIC_SEPARATION);
+        // Candidate 0: the current pairwise-pass result.
+        {
+            CandidateAN cand;
+            cand.positions = cycle_isovertices;
+            cand.label = "pairwise_attempt";
+            cand.move2 = compute_move2(cand.positions);
+            candidates.push_back(std::move(cand));
+        }
+
+        // Candidates: self-reflect each cycle individually from the baseline.
+        for (int c = 0; c < num_cycles; ++c) {
+            CandidateAN cand;
+            cand.positions = baseline_positions;
+            cand.positions[static_cast<size_t>(c)] =
+                reflect_through_center(center, baseline_positions[static_cast<size_t>(c)]);
+            std::ostringstream label;
+            label << "reflect_cycle" << c;
+            cand.label = label.str();
+            cand.move2 = compute_move2(cand.positions);
+            candidates.push_back(std::move(cand));
+        }
+
+        // Candidates: move one cycle to the diametric position of another cycle (baseline).
+        for (int a = 0; a < num_cycles; ++a) {
+            for (int b = 0; b < num_cycles; ++b) {
+                if (a == b) continue;
+
+                CandidateAN cand;
+                cand.positions = baseline_positions;
+                cand.positions[static_cast<size_t>(a)] =
+                    reflect_through_center(center, baseline_positions[static_cast<size_t>(b)]);
+                std::ostringstream label;
+                label << "reflect_cycle" << a << "_from" << b;
+                cand.label = label.str();
+                cand.move2 = compute_move2(cand.positions);
+                candidates.push_back(std::move(cand));
+            }
+        }
+
+        CandidateAN* best_resolved = nullptr;
+        CandidateAN* best_improved = nullptr;
+        CandidateAN* best_any = nullptr;
+        for (auto& cand : candidates) {
+            cand.intersections = count_self_intersection_pairs(v, cand.positions, dt, cell_by_index);
+            const bool resolved = (cand.intersections == 0);
+            const bool improved =
+                (!resolved) && (baseline_intersections > 0) && (cand.intersections < baseline_intersections);
+            if (trace) {
+                DEBUG_PRINT("[DEL-SELFI-A] v=" << v->info().index
+                            << " " << cand.label
+                            << ": intersections=" << cand.intersections
+                            << "/" << baseline_intersections
+                            << " "
+                            << (resolved ? "RESOLVED" :
+                                    (improved ? "IMPROVED" : "NO_IMPROVEMENT"))
+                            << " move2=" << cand.move2);
+            }
+            if (!best_any ||
+                cand.intersections < best_any->intersections ||
+                (cand.intersections == best_any->intersections &&
+                 cand.move2 < best_any->move2)) {
+                best_any = &cand;
+            }
+            if (resolved) {
+                if (!best_resolved || cand.move2 < best_resolved->move2) {
+                    best_resolved = &cand;
+                }
+                continue;
+            }
+            if (improved) {
+                if (!best_improved ||
+                    cand.intersections < best_improved->intersections ||
+                    (cand.intersections == best_improved->intersections &&
+                     cand.move2 < best_improved->move2)) {
+                    best_improved = &cand;
                 }
             }
+        }
 
-            if (search.found_solution) {
-                break;
+        if (best_resolved) {
+            cycle_isovertices = best_resolved->positions;
+            if (geometric_attempt_positions_out) {
+                *geometric_attempt_positions_out = best_resolved->positions;
+            }
+            return {ResolutionStatus::RESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
+        }
+
+        if (best_improved) {
+            cycle_isovertices = best_improved->positions;
+            if (geometric_attempt_positions_out) {
+                *geometric_attempt_positions_out = best_improved->positions;
+            }
+            return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
+        }
+
+        if (geometric_attempt_positions_out) {
+            if (best_any) {
+                *geometric_attempt_positions_out = best_any->positions;
+            } else {
+                *geometric_attempt_positions_out = cycle_isovertices;
             }
         }
 
-        if (search.found_solution) {
-            cycle_isovertices = search.best_positions;
-            return {ResolutionStatus::RESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
-        }
-    }
+        cycle_isovertices = baseline_positions;
+        return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
 
     if (geometric_attempt_positions_out) {
         *geometric_attempt_positions_out = cycle_isovertices;
@@ -2949,8 +2797,6 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
     const std::vector<Cell_handle>& cell_by_index,
     const CycleIsovertexOptions& options,
     std::unordered_set<int>* local_unresolved_dumped_vertices
@@ -2998,15 +2844,13 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     maybe_dump_selfi_stage(dt, v, baseline_positions, cell_by_index, "baseline");
 
     std::vector<Point> geometric_attempt_positions;
-    const ResolutionResult separation_result =
-        try_resolve_multicycle_by_cycle_separation_tests(
-            v,
-            cycle_isovertices,
-            dt,
-            grid,
-            cell_by_index,
-            options.reposition_multi_isovA,
-            &geometric_attempt_positions);
+	    const ResolutionResult separation_result =
+	        try_resolve_multicycle_by_cycle_separation_tests(
+	            v,
+	            cycle_isovertices,
+	            dt,
+	            cell_by_index,
+	            &geometric_attempt_positions);
     if (separation_result.status == ResolutionStatus::RESOLVED) {
         DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
                     << " resolved by geometric separation (cycles=" << num_cycles << ").");
@@ -3021,8 +2865,7 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
                             << ") tri(" << w->tri0 << "," << w->tri1 << ")");
             }
         }
-        maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index,
-            options.reposition_multi_isovA ? "A" : "geometric");
+        maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index, "A");
         return separation_result;
     }
     if (trace) {
@@ -3033,74 +2876,39 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
                         << ") tri(" << w->tri0 << "," << w->tri1 << ")");
         }
     }
-    maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index,
-        options.reposition_multi_isovA ? "A" : "geometric");
+    maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index, "A");
 
-    if (options.reposition_multi_isovA) {
-        if (trace || log_unresolved_A_vertices()) {
-            DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
-                        << " unresolved by A-separation (cycles=" << num_cycles << ").");
-        }
-        if (trace) {
-            DEBUG_PRINT("[DEL-SELFI-TRACE] Vertex " << v->info().index
-                        << ": skipping candidate search (-reposition_multi_isovA).");
-        }
-
-        // -reposition_multi_isovA_trace: dump the first time this vertex fails locally
-        // (per-run, not per-pass) into <trace_dir>/local/.
-        if (options.reposition_multi_isovA_trace &&
-            !options.reposition_multi_isovA_trace_dir.empty() &&
-            separation_result.status == ResolutionStatus::UNRESOLVED &&
-            local_unresolved_dumped_vertices) {
-            const int vidx = v->info().index;
-            if (local_unresolved_dumped_vertices->insert(vidx).second) {
-                const std::filesystem::path out_dir =
-                    std::filesystem::path(options.reposition_multi_isovA_trace_dir) / "local";
-
-                // Also dump the deterministic A-only candidate set (both reflections for 2-cycle,
-                // per-cycle reflections for 3+ cycles, plus the pairwise-pass attempt).
-                dump_reposition_multi_isovA_trace_case(
-                    out_dir, v, baseline_positions, dt, grid, cell_by_index);
-
-                // Match the historical "simple_multi_failures" trace format: baseline + attempt.
-                // (baseline is already emitted by dump_reposition_multi_isovA_trace_case.)
-                if (!geometric_attempt_positions.empty()) {
-                    dump_simple_multi_failure_stage(
-                        out_dir, v, geometric_attempt_positions, dt, cell_by_index, "geometric_attempt");
-                }
-            }
-        }
-        return separation_result;
-    }
-
-    // Not solvable by geometric separation, try fibonacci uniform distribution of vertices among the sphere
-    cycle_isovertices = baseline_positions;
-    const ResolutionResult fib_result = solve_local_self_intersection_by_spherical_candidate_search(
-        v, cycle_isovertices, dt, grid, isovalue, cell_by_index);
-    if (fib_result.status == ResolutionStatus::RESOLVED) {
+    if (trace || log_unresolved_A_vertices()) {
         DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
-                    << " resolved by fibonacci fallback (cycles=" << num_cycles << ").");
-        if (trace) {
-            for (int c = 0; c < num_cycles; ++c) {
-                const Point& p = cycle_isovertices[static_cast<size_t>(c)];
-                DEBUG_PRINT("[DEL-SELFI-TRACE]   fibonacci[" << c << "]=("
-                            << p.x() << ", " << p.y() << ", " << p.z() << ")");
+                    << " unresolved by A-separation (cycles=" << num_cycles << ").");
+    }
+
+    // -reposition_multi_isovA_trace: dump the first time this vertex fails locally
+    // (per-run, not per-pass) into <trace_dir>/local/.
+    if (options.reposition_multi_isovA_trace &&
+        !options.reposition_multi_isovA_trace_dir.empty() &&
+        separation_result.status == ResolutionStatus::UNRESOLVED &&
+        local_unresolved_dumped_vertices) {
+        const int vidx = v->info().index;
+        if (local_unresolved_dumped_vertices->insert(vidx).second) {
+            const std::filesystem::path out_dir =
+                std::filesystem::path(options.reposition_multi_isovA_trace_dir) / "local";
+
+            // Also dump the deterministic A-only candidate set (both reflections for 2-cycle,
+            // per-cycle reflections for 3+ cycles, plus the pairwise-pass attempt).
+            dump_reposition_multi_isovA_trace_case(
+                out_dir, v, baseline_positions, dt, cell_by_index);
+
+            // Match the historical "simple_multi_failures" trace format: baseline + attempt.
+            // (baseline is already emitted by dump_reposition_multi_isovA_trace_case.)
+            if (!geometric_attempt_positions.empty()) {
+                dump_simple_multi_failure_stage(
+                    out_dir, v, geometric_attempt_positions, dt, cell_by_index, "geometric_attempt");
             }
-            if (const auto w = find_self_intersection_witness(v, cycle_isovertices, dt, cell_by_index)) {
-                DEBUG_PRINT("[DEL-SELFI-TRACE]   fibonacci witness: cycle(" << w->cycle0 << "," << w->cycle1
-                            << ") tri(" << w->tri0 << "," << w->tri1 << ")");
-            }
-        }
-    } else if (trace) {
-        DEBUG_PRINT("[DEL-SELFI-TRACE] Vertex " << v->info().index
-                    << ": fibonacci fallback failed.");
-        if (const auto w = find_self_intersection_witness(v, cycle_isovertices, dt, cell_by_index)) {
-            DEBUG_PRINT("[DEL-SELFI-TRACE]   fibonacci witness: cycle(" << w->cycle0 << "," << w->cycle1
-                        << ") tri(" << w->tri0 << "," << w->tri1 << ")");
         }
     }
-    maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index, "fibonacci");
-    return fib_result;
+
+    return separation_result;
 }
 
 // ============================================================================
@@ -3140,15 +2948,8 @@ static void update_resolution_stats(
         case ResolutionStatus::RESOLVED:
             any_changed = true;
             pass_resolved++;
-	            switch (result.strategy) {
-	                case ResolutionStrategy::GEOMETRIC_SEPARATION:
-	                    stats.strat_geometric_separation++;
-	                    break;
-	                case ResolutionStrategy::FIBONACCI_SPHERE:
-	                    stats.strat_fibonacci_sphere++;
-	                    break;
-	                default:
-	                    break;
+            if (result.strategy == ResolutionStrategy::GEOMETRIC_SEPARATION) {
+                stats.strat_geometric_separation++;
             }
             break;
         case ResolutionStatus::UNRESOLVED:
@@ -3243,8 +3044,6 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
 
 static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
     Delaunay& dt,
-    const UnifiedGrid& grid,
-    float isovalue,
     const std::vector<Cell_handle>& cell_by_index,
     const std::vector<Vertex_handle>& multi_cycle_vertices,
     IsovertexComputationStats& stats,
@@ -3271,31 +3070,50 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
         int pass_resolved = 0;
         int pass_unresolved = 0;
 
-        // Process each multi-cycle vertex for self-intersection.
-        for (Vertex_handle vh : multi_cycle_vertices) {
-            if (!vh->info().active) continue;
-            if (vh->info().is_dummy) continue;
-            if (vh->info().facet_cycles.size() < 2) continue;
+	        // Process each multi-cycle vertex for self-intersection.
+	        for (Vertex_handle vh : multi_cycle_vertices) {
+	            if (!vh->info().active) continue;
+	            if (vh->info().is_dummy) continue;
+	            if (vh->info().facet_cycles.size() < 2) continue;
 
-            auto& isovertices = vh->info().cycle_isovertices;
+	            auto& isovertices = vh->info().cycle_isovertices;
+	            const std::vector<Point> isovertices_before = isovertices;
 
             const ResolutionResult result = resolve_multicycle_self_intersection_at_vertex(
                 vh,
                 isovertices,
                 dt,
-                grid,
-                isovalue,
                 cell_by_index,
                 options,
                 local_unresolved_dumped_vertices_ptr);
 
-            update_resolution_stats(result, stats, any_changed,
-                pass_detected, pass_resolved, pass_unresolved);
+	            update_resolution_stats(result, stats, any_changed,
+	                pass_detected, pass_resolved, pass_unresolved);
 
-            // Track which vertices were modified for targeted cleanup passes.
-            const ResolutionStatus status = result.status;
-            if (status == ResolutionStatus::RESOLVED ||
-                status == ResolutionStatus::UNRESOLVED) {
+	            // Even if we couldn't fully resolve, keep stabilization passes going when
+	            // the vertex moved (partial improvement in A-only mode).
+	            {
+	                bool moved = false;
+	                if (isovertices_before.size() != isovertices.size()) {
+	                    moved = true;
+	                } else {
+	                    constexpr double eps2 = 1e-18;
+	                    for (size_t i = 0; i < isovertices.size(); ++i) {
+	                        if (squared_distance(isovertices_before[i], isovertices[i]) > eps2) {
+	                            moved = true;
+	                            break;
+	                        }
+	                    }
+	                }
+	                if (moved) {
+	                    any_changed = true;
+	                }
+	            }
+
+	            // Track which vertices were modified for targeted cleanup passes.
+	            const ResolutionStatus status = result.status;
+	            if (status == ResolutionStatus::RESOLVED ||
+	                status == ResolutionStatus::UNRESOLVED) {
                 if (modified_multi_cycle_indices.insert(vh->info().index).second) {
                     modified_multi_cycle_vertices.push_back(vh);
                 }
@@ -3371,7 +3189,7 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
 
             final_unresolved.push_back(vh->info().index);
             dump_reposition_multi_isovA_trace_case(
-                final_dir, vh, isovertices, dt, grid, cell_by_index);
+                final_dir, vh, isovertices, dt, cell_by_index);
         }
 
         // Emit a small summary file and a one-line status message (trace mode only).
@@ -3409,8 +3227,7 @@ static void report_isovertex_statistics(const IsovertexComputationStats& stats) 
                     << ", resolved=" << stats.self_intersection_resolved
                     << ", unresolved=" << stats.self_intersection_unresolved);
 
-        const int64_t resolved_total =
-            stats.strat_geometric_separation + stats.strat_fibonacci_sphere;
+        const int64_t resolved_total = stats.strat_geometric_separation;
         if (resolved_total > 0) {
             auto pct = [&](int64_t count) -> int {
                 return static_cast<int>((count * 100 + resolved_total / 2) / resolved_total);
@@ -3419,8 +3236,6 @@ static void report_isovertex_statistics(const IsovertexComputationStats& stats) 
             DEBUG_PRINT("[DEL-SELFI] Resolution strategy breakdown:");
             DEBUG_PRINT("[DEL-SELFI]   geometric_separation: " << stats.strat_geometric_separation
                         << " (" << pct(stats.strat_geometric_separation) << "%)");
-            DEBUG_PRINT("[DEL-SELFI]   fibonacci_sphere: " << stats.strat_fibonacci_sphere
-                        << " (" << pct(stats.strat_fibonacci_sphere) << "%)");
         }
     }
 }
@@ -3442,7 +3257,7 @@ static void report_isovertex_statistics(const IsovertexComputationStats& stats) 
  *
  *   Stage 2 (resolve_multicycle_self_intersections):
  *     Iteratively resolve self-intersections on multi-cycle vertices.
- *     Uses the PositionMultiIsov separation tests first, then a heuristic fallback search.
+ *     Uses only deterministic hyperplane separation tests + diametric reflections through the Delaunay site.
  *
  * @param dt The Delaunay triangulation with cycles computed.
  * @param grid The scalar field grid.
@@ -3483,8 +3298,7 @@ void compute_cycle_isovertices(
     // Stage 2: Resolve self-intersections on multi-cycle vertices.
     // ========================================================================
     resolve_multicycle_self_intersections(
-        dt, grid, isovalue, cell_by_index, multi_cycle_vertices, stats,
-        options);
+        dt, cell_by_index, multi_cycle_vertices, stats, options);
 
     // ========================================================================
     // Report final statistics.
