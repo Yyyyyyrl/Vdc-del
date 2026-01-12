@@ -1129,6 +1129,22 @@ static int count_self_intersection_pairs(
         return 0;
     }
 
+    int count = 0;
+
+    // Treat coincident cycle isovertices as an intersection condition.
+    // This matches downstream self-intersection tools which count point-touching
+    // intersections between triangles that do not share mesh vertex indices.
+    for (size_t a = 0; a < num_cycles && a < cycle_isovertices.size(); ++a) {
+        for (size_t b = a + 1; b < num_cycles && b < cycle_isovertices.size(); ++b) {
+            if (cycle_isovertices[a] == cycle_isovertices[b]) {
+                ++count;
+                if (count >= max_count) {
+                    return count;
+                }
+            }
+        }
+    }
+
     std::vector<std::vector<Triangle_3>> cycle_triangles(num_cycles);
     for (size_t c = 0; c < num_cycles; ++c) {
         if (c >= cycle_isovertices.size()) {
@@ -1137,8 +1153,6 @@ static int count_self_intersection_pairs(
         cycle_triangles[c] = collect_cycle_triangles(
             dt, v, static_cast<int>(c), cycle_isovertices[c], cell_by_index);
     }
-
-    int count = 0;
 
     for (size_t c = 0; c < num_cycles; ++c) {
         const auto& tris = cycle_triangles[c];
@@ -1208,6 +1222,25 @@ bool check_self_intersection(
 
     if (num_cycles < 1) {
         return false;
+    }
+
+    // Between-cycle degeneracy: if two cycle isovertices are coincident, then triangles from those
+    // cycles can touch at a single point without sharing mesh vertex indices, which downstream tools
+    // (e.g. ijkmeshinfo -selfI) count as self-intersection. Treat this as a self-intersection so the
+    // A-only repositioning logic can separate the cycles deterministically.
+    if (num_cycles > 1) {
+        for (size_t a = 0; a < num_cycles && a < cycle_isovertices.size(); ++a) {
+            for (size_t b = a + 1; b < num_cycles && b < cycle_isovertices.size(); ++b) {
+                if (cycle_isovertices[a] == cycle_isovertices[b]) {
+                    if (trace_details) {
+                        DEBUG_PRINT("[DEL-SELFI-INT] Vertex " << v_idx
+                                    << " coincident cycle isovertices: (" << a << "," << b << ") at "
+                                    << cycle_isovertices[a]);
+                    }
+                    return true;
+                }
+            }
+        }
     }
 
     // Fast path: for a single-cycle vertex, only check for intersections within the fan.
@@ -1879,9 +1912,28 @@ static bool write_simple_multi_failure_summary_txt(
 
     const bool within = cycle_triangles_have_within_cycle_intersection(cycle_triangles);
     const auto between_pair = first_between_cycle_intersection_pair(cycle_triangles);
-    const bool any = within || between_pair.has_value();
+
+    std::vector<std::pair<int, int>> coincident_cycles;
+    {
+        const size_t n = std::min(cycles.size(), cycle_isovertices.size());
+        for (size_t a = 0; a < n; ++a) {
+            for (size_t b = a + 1; b < n; ++b) {
+                if (cycle_isovertices[a] == cycle_isovertices[b]) {
+                    coincident_cycles.emplace_back(static_cast<int>(a), static_cast<int>(b));
+                }
+            }
+        }
+    }
+
+    const bool any = within || between_pair.has_value() || !coincident_cycles.empty();
 
     out << "self_intersection_any " << (any ? 1 : 0) << "\n";
+    if (!coincident_cycles.empty()) {
+        out << "self_intersection_coincident_isovertices\n";
+        for (const auto& p : coincident_cycles) {
+            out << "coincident_cycles " << p.first << "-" << p.second << "\n";
+        }
+    }
 
     const auto within_witness = first_within_cycle_intersection_trace(cycle_triangles);
     if (within) {

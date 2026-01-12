@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <ctime>
+#include <fstream>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -84,6 +85,92 @@ static std::string trace_config_tag(const VdcParam& param) {
         out << parts[i];
     }
     return out.str();
+}
+
+static void dump_duplicate_isovertex_positions(
+    const std::filesystem::path& trace_root,
+    const DelaunayIsosurface& iso_surface
+) {
+    if (trace_root.empty()) {
+        return;
+    }
+
+    struct Key {
+        double x = 0.0;
+        double y = 0.0;
+        double z = 0.0;
+
+        bool operator==(const Key& other) const noexcept {
+            return x == other.x && y == other.y && z == other.z;
+        }
+    };
+
+    struct KeyHash {
+        size_t operator()(const Key& k) const noexcept {
+            const size_t h1 = std::hash<double>{}(k.x);
+            const size_t h2 = std::hash<double>{}(k.y);
+            const size_t h3 = std::hash<double>{}(k.z);
+            size_t h = h1;
+            h ^= (h2 + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+            h ^= (h3 + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+            return h;
+        }
+    };
+
+    std::unordered_map<Key, std::vector<int>, KeyHash> groups;
+    groups.reserve(iso_surface.isovertices.size());
+
+    const auto& s = iso_surface.vertex_scale;
+    for (size_t i = 0; i < iso_surface.isovertices.size(); ++i) {
+        const Point& p = iso_surface.isovertices[i];
+        const Key k{
+            p.x() * s[0],
+            p.y() * s[1],
+            p.z() * s[2],
+        };
+        groups[k].push_back(static_cast<int>(i));
+    }
+
+    std::vector<std::pair<Key, std::vector<int>>> dups;
+    dups.reserve(32);
+    for (auto& kv : groups) {
+        if (kv.second.size() > 1) {
+            dups.emplace_back(kv.first, std::move(kv.second));
+        }
+    }
+
+    std::sort(dups.begin(), dups.end(), [](const auto& a, const auto& b) {
+        return a.second.size() > b.second.size();
+    });
+
+    std::error_code ec;
+    std::filesystem::create_directories(trace_root, ec);
+
+    std::ofstream out(trace_root / "global_duplicate_isovertex_positions.txt");
+    if (!out) {
+        return;
+    }
+
+    out << std::setprecision(17);
+    out << "count_groups " << dups.size() << "\n";
+
+    if (dups.empty()) {
+        return;
+    }
+
+    for (const auto& g : dups) {
+        out << "pos " << g.first.x << " " << g.first.y << " " << g.first.z
+            << " count " << g.second.size() << "\n";
+        for (const int isov_idx : g.second) {
+            const int delv = (isov_idx >= 0 && static_cast<size_t>(isov_idx) < iso_surface.isovertex_delaunay_vertex.size())
+                                 ? iso_surface.isovertex_delaunay_vertex[static_cast<size_t>(isov_idx)]
+                                 : -1;
+            const int cyc = (isov_idx >= 0 && static_cast<size_t>(isov_idx) < iso_surface.isovertex_cycle_index.size())
+                                 ? iso_surface.isovertex_cycle_index[static_cast<size_t>(isov_idx)]
+                                 : -1;
+            out << "  isov " << isov_idx << " delv " << delv << " cycle " << cyc << "\n";
+        }
+    }
 }
 
 //! @brief Main entry point
@@ -401,6 +488,10 @@ int main(int argc, char* argv[]) {
 
     // Set vertex scale from physical spacing for correct output with non-uniform grids
     iso_surface.vertex_scale = {grid.physical_spacing[0], grid.physical_spacing[1], grid.physical_spacing[2]};
+
+    if (param.reposition_multi_isovA_trace && !reposition_multi_isovA_trace_dir.empty()) {
+        dump_duplicate_isovertex_positions(reposition_multi_isovA_trace_dir, iso_surface);
+    }
 
     const size_t num_vertices = iso_surface.num_vertices();
     const size_t num_triangles = iso_surface.num_triangles();
