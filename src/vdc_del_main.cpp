@@ -49,17 +49,41 @@ static std::string format_float_for_path(float v) {
     return s;
 }
 
-static std::string timestamp_yyyymmdd_hhmmss() {
-    const std::time_t now = std::time(nullptr);
-    std::tm tm_buf{};
-#if defined(_WIN32)
-    localtime_s(&tm_buf, &now);
-#else
-    tm_buf = *std::localtime(&now);
-#endif
-    std::ostringstream ss;
-    ss << std::put_time(&tm_buf, "%Y%m%d_%H%M%S");
-    return ss.str();
+static std::string trace_config_tag(const VdcParam& param) {
+    std::vector<std::string> parts;
+
+    if (param.supersample) {
+        parts.push_back("sup" + std::to_string(param.supersample_r));
+    }
+
+    if (param.sep) {
+        std::ostringstream ss;
+        ss << "sep" << param.sep_split << "_dist" << param.sep_dist;
+        parts.push_back(ss.str());
+    }
+
+    if (!param.multi_isov) {
+        parts.push_back("single_isov");
+    }
+    if (param.position_delv_on_isov) {
+        parts.push_back("delv_on_isov");
+    }
+    if (!param.mod_cyc) {
+        parts.push_back("no_modcyc");
+    }
+
+    if (parts.empty()) {
+        return "default";
+    }
+
+    std::ostringstream out;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) {
+            out << "_";
+        }
+        out << parts[i];
+    }
+    return out.str();
 }
 
 //! @brief Main entry point
@@ -325,12 +349,20 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        const std::filesystem::path base = "simple_multi_failures_trace";
+        const std::filesystem::path base = repo_root / "analysis" / "simple_multi_failures" / "trace";
         const std::filesystem::path input_path(param.file_path);
         const std::string dataset = input_path.stem().string().empty() ? "dataset" : input_path.stem().string();
         const std::string iso = format_float_for_path(param.isovalue);
-        const std::string ts = timestamp_yyyymmdd_hhmmss();
-        const std::filesystem::path dir = base / dataset / ("iso" + iso + "_A_" + ts);
+        const std::string cfg = trace_config_tag(param);
+        const std::filesystem::path dir = base / dataset / ("iso" + iso + "_" + cfg);
+
+        // Clear any existing dumps so repeated runs don't accumulate stale cases.
+        {
+            std::error_code rm_ec;
+            std::filesystem::remove_all(dir / "local", rm_ec);
+            rm_ec.clear();
+            std::filesystem::remove_all(dir / "final", rm_ec);
+        }
 
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
