@@ -197,7 +197,7 @@ struct IsovertexComputationStats {
 struct CycleIsovertexOptions {
     bool position_multi_isov_on_delv = false; ///< Debug only: place all multi-cycle isovertices at the Delaunay vertex.
     bool reposition_multi_isovA = false;      ///< Use only hyperplane separation + reflection (no candidate search).
-    bool reposition_multi_isovA_trace = false; ///< Dump all unresolved A failures (baseline/geometric_attempt) as OFF/TXT.
+    bool reposition_multi_isovA_trace = false; ///< Dump A trace (local/ + final/) as OFF/TXT.
     std::string reposition_multi_isovA_trace_dir; ///< Output directory for -reposition_multi_isovA_trace (empty disables dumps).
 };
 

@@ -24,7 +24,7 @@ struct VdcParam {
     bool position_delv_on_isov = false; //!< Flag to position Delaunay vertices on isosurface vertices
     bool position_multi_isov_on_delv = false; //!< Debug: place all multi-cycle isovertices at the Delaunay vertex
     bool reposition_multi_isovA = false; //!< Reposition multi isovertices using only hyperplane separation and reflection
-    bool reposition_multi_isovA_trace = false; //!< Like -reposition_multi_isovA, but also dumps all unresolved A failures (baseline/geometric_attempt) to OFF/TXT files
+    bool reposition_multi_isovA_trace = false; //!< Like -reposition_multi_isovA, but also dumps A trace (local/ + final/) as OFF/TXT files
     bool terse = false;            //!< Guard: print only vertices/triangles and output file
     bool timing_stats = false;     //!< Guard: print timing statistics at the end of the run
     bool refine_small_angles = false; //!< Guard: enable facet-centric surface refinement

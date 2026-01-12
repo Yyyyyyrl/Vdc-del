@@ -20,7 +20,7 @@ void print_help()
     std::cout << "  -position_delv_on_isov      : Position Delaunay vertices on isosurface vertices instead of cube iso-crossings.\n";
     std::cout << "  -position_multi_isov_on_delv: Debug only. For multi-cycle vertices, place all iso-vertices at the Delaunay vertex (disables repositioning).\n";
     std::cout << "  -reposition_multi_isovA     : Reposition multi-cycle iso-vertices using only hyperplane separation + reflection (no multi-radius/rotations/fibonacci).\n";
-    std::cout << "  -reposition_multi_isovA_trace: Like -reposition_multi_isovA, but also dumps all unresolved A failures (baseline/geometric_attempt) as OFF/TXT under analysis/simple_multi_failures_trace/.\n";
+    std::cout << "  -reposition_multi_isovA_trace: Like -reposition_multi_isovA, but also dumps A trace as OFF/TXT under analysis/simple_multi_failures/trace/ (subdirs: local/, final/).\n";
     std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
     std::cout << "                               Default trigger: min_angle=20 deg, max_angle=off.\n";
     std::cout << "  -min_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold.\n";

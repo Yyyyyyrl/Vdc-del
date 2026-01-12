@@ -303,7 +303,29 @@ int main(int argc, char* argv[]) {
 
     std::string reposition_multi_isovA_trace_dir;
     if (param.reposition_multi_isovA_trace) {
-        const std::filesystem::path base("analysis/simple_multi_failures_trace");
+        // Root trace outputs at repo root, independent of the current working directory.
+        std::filesystem::path repo_root;
+        {
+            std::error_code ec;
+            std::filesystem::path exe_path = std::filesystem::weakly_canonical(argv[0], ec);
+            if (ec || exe_path.empty()) {
+                ec.clear();
+                exe_path = std::filesystem::absolute(argv[0], ec);
+            }
+
+            // Typical dev layout: <repo>/{build,build-local}/vdc-del
+            if (!exe_path.empty()) {
+                repo_root = exe_path.parent_path().parent_path();
+                if (!std::filesystem::exists(repo_root / "CMakeLists.txt")) {
+                    repo_root.clear();
+                }
+            }
+            if (repo_root.empty()) {
+                repo_root = std::filesystem::current_path();
+            }
+        }
+
+        const std::filesystem::path base = repo_root / "analysis" / "simple_multi_failures" / "trace";
         const std::filesystem::path input_path(param.file_path);
         const std::string dataset = input_path.stem().string().empty() ? "dataset" : input_path.stem().string();
         const std::string iso = format_float_for_path(param.isovalue);
@@ -317,7 +339,8 @@ int main(int argc, char* argv[]) {
                       << " (" << ec.message() << ")\n";
         } else {
             reposition_multi_isovA_trace_dir = dir.string();
-            std::cerr << "[DEL-SELFI-A-TRACE] Dumping unresolved A failures under: " << reposition_multi_isovA_trace_dir << "\n";
+            std::cerr << "[DEL-SELFI-A-TRACE] Dumping A trace under: " << reposition_multi_isovA_trace_dir
+                      << " (subdirs: local/, final/)\n";
         }
     }
 
