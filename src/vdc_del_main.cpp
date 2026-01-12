@@ -17,6 +17,9 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -28,6 +31,35 @@ void print_header() {
     std::cout << "========================================\n";
     std::cout << " vdc-del: Delaunay-based Dual Contouring\n";
     std::cout << "========================================\n\n";
+}
+
+static std::string format_float_for_path(float v) {
+    std::ostringstream ss;
+    ss << std::fixed << std::setprecision(6) << static_cast<double>(v);
+    std::string s = ss.str();
+    while (!s.empty() && s.back() == '0') {
+        s.pop_back();
+    }
+    if (!s.empty() && s.back() == '.') {
+        s.pop_back();
+    }
+    if (s.empty()) {
+        s = "0";
+    }
+    return s;
+}
+
+static std::string timestamp_yyyymmdd_hhmmss() {
+    const std::time_t now = std::time(nullptr);
+    std::tm tm_buf{};
+#if defined(_WIN32)
+    localtime_s(&tm_buf, &now);
+#else
+    tm_buf = *std::localtime(&now);
+#endif
+    std::ostringstream ss;
+    ss << std::put_time(&tm_buf, "%Y%m%d_%H%M%S");
+    return ss.str();
 }
 
 //! @brief Main entry point
@@ -269,9 +301,31 @@ int main(int argc, char* argv[]) {
         std::cout << "Computing isovertex positions...\n";
     }
 
+    std::string reposition_multi_isovA_trace_dir;
+    if (param.reposition_multi_isovA_trace) {
+        const std::filesystem::path base("analysis/simple_multi_failures_trace");
+        const std::filesystem::path input_path(param.file_path);
+        const std::string dataset = input_path.stem().string().empty() ? "dataset" : input_path.stem().string();
+        const std::string iso = format_float_for_path(param.isovalue);
+        const std::string ts = timestamp_yyyymmdd_hhmmss();
+        const std::filesystem::path dir = base / dataset / ("iso" + iso + "_A_" + ts);
+
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        if (ec) {
+            std::cerr << "[DEL-SELFI-A-TRACE] Warning: failed to create directory: " << dir
+                      << " (" << ec.message() << ")\n";
+        } else {
+            reposition_multi_isovA_trace_dir = dir.string();
+            std::cerr << "[DEL-SELFI-A-TRACE] Dumping unresolved A failures under: " << reposition_multi_isovA_trace_dir << "\n";
+        }
+    }
+
     const CycleIsovertexOptions isovertex_options{
         param.position_multi_isov_on_delv,
-        param.reposition_multi_isovA
+        param.reposition_multi_isovA,
+        param.reposition_multi_isovA_trace,
+        reposition_multi_isovA_trace_dir,
     };
 
     compute_cycle_isovertices(

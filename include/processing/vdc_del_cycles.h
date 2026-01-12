@@ -13,6 +13,7 @@
 #include "processing/vdc_grid.h"
 #include <vector>
 #include <cstdint>
+#include <string>
 
 // ============================================================================
 // Facet and Edge Key Types
@@ -196,6 +197,8 @@ struct IsovertexComputationStats {
 struct CycleIsovertexOptions {
     bool position_multi_isov_on_delv = false; ///< Debug only: place all multi-cycle isovertices at the Delaunay vertex.
     bool reposition_multi_isovA = false;      ///< Use only hyperplane separation + reflection (no candidate search).
+    bool reposition_multi_isovA_trace = false; ///< Dump all unresolved A failures (baseline/geometric_attempt) as OFF/TXT.
+    std::string reposition_multi_isovA_trace_dir; ///< Output directory for -reposition_multi_isovA_trace (empty disables dumps).
 };
 
 /**
