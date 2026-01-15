@@ -194,9 +194,9 @@ struct IsovertexComputationStats {
  */
 struct CycleIsovertexOptions {
     bool position_multi_isov_on_delv = false; ///< Debug only: place all multi-cycle isovertices at the Delaunay vertex.
-    bool reposition_multi_isovA = false;      ///< Use only hyperplane separation + reflection (no candidate search).
-    bool reposition_multi_isovA_trace = false; ///< Dump A trace (local/ + final/) as OFF/TXT.
-    std::string reposition_multi_isovA_trace_dir; ///< Output directory for -reposition_multi_isovA_trace (empty disables dumps).
+    bool multi_isov_trace = false;            ///< Dump multi-cycle isovertex resolution trace (local/ + final/) as OFF/TXT.
+    bool foldover = false;                    ///< Enable Stage 3: within-cycle fan foldover resolution.
+    std::string multi_isov_trace_dir;         ///< Output directory for -multi_isov_trace (empty disables dumps).
 };
 
 /**

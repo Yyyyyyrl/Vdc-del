@@ -19,8 +19,10 @@ void print_help()
     std::cout << "  -single_isov                : Use single iso-vertices mode.\n";
     std::cout << "  -position_delv_on_isov      : Position Delaunay vertices on isosurface vertices instead of cube iso-crossings.\n";
     std::cout << "  -position_multi_isov_on_delv: Debug only. For multi-cycle vertices, place all iso-vertices at the Delaunay vertex (disables repositioning).\n";
-    std::cout << "  -reposition_multi_isovA     : Reposition multi-cycle iso-vertices using only hyperplane separation + reflection (no multi-radius/rotations/fibonacci).\n";
-    std::cout << "  -reposition_multi_isovA_trace: Like -reposition_multi_isovA, but also dumps A trace as OFF/TXT under analysis/simple_multi_failures/trace/ (subdirs: local/, final/).\n";
+    std::cout << "  -multi_isov_trace           : Dump multi-cycle isovertex resolution trace as OFF/TXT under simple_multi_failures_trace/ (subdirs: local/, final/).\n";
+    std::cout << "  -foldover                   : Enable Stage 3: within-cycle fan foldover resolution.\n";
+    std::cout << "  -out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"] : Output Delaunay triangulation to delv_<mesh>.off.\n";
+    std::cout << "                               Optional: specify bounding box to crop the output.\n";
     std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
     std::cout << "                               Default trigger: min_angle=20 deg, max_angle=off.\n";
     std::cout << "  -min_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold.\n";
@@ -95,14 +97,33 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         {
             vp.position_multi_isov_on_delv = true;
         }
-        else if (arg == "-reposition_multi_isovA")
+        else if (arg == "-multi_isov_trace")
         {
-            vp.reposition_multi_isovA = true;
+            vp.multi_isov_trace = true;
         }
-        else if (arg == "-reposition_multi_isovA_trace")
+        else if (arg == "-foldover")
         {
-            vp.reposition_multi_isovA = true;
-            vp.reposition_multi_isovA_trace = true;
+            vp.foldover = true;
+        }
+        else if (arg == "-out_delv")
+        {
+            vp.out_delv = true;
+            // Check if next two arguments look like bounding box coordinates (quoted strings with 3 numbers each)
+            // Format: -out_delv "xmin ymin zmin" "xmax ymax zmax"
+            if (i + 2 < argc && argv[i + 1][0] != '-' && argv[i + 2][0] != '-') {
+                // Try to parse the bounding box
+                double min_coords[3], max_coords[3];
+                int min_parsed = std::sscanf(argv[i + 1], "%lf %lf %lf", &min_coords[0], &min_coords[1], &min_coords[2]);
+                int max_parsed = std::sscanf(argv[i + 2], "%lf %lf %lf", &max_coords[0], &max_coords[1], &max_coords[2]);
+                if (min_parsed == 3 && max_parsed == 3) {
+                    vp.out_delv_has_bbox = true;
+                    for (int k = 0; k < 3; ++k) {
+                        vp.out_delv_bbox_min[k] = min_coords[k];
+                        vp.out_delv_bbox_max[k] = max_coords[k];
+                    }
+                    i += 2; // Consume the two arguments
+                }
+            }
         }
         else if (arg == "-refine_small_angles")
         {

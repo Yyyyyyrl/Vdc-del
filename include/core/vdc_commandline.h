@@ -23,8 +23,12 @@ struct VdcParam {
     bool supersample;              //!< Flag to enable supersampling of the input data.
     bool position_delv_on_isov = false; //!< Flag to position Delaunay vertices on isosurface vertices
     bool position_multi_isov_on_delv = false; //!< Debug: place all multi-cycle isovertices at the Delaunay vertex
-    bool reposition_multi_isovA = false; //!< Reposition multi isovertices using only hyperplane separation and reflection
-    bool reposition_multi_isovA_trace = false; //!< Like -reposition_multi_isovA, but also dumps A trace (local/ + final/) as OFF/TXT files
+    bool multi_isov_trace = false; //!< Dumps multi-cycle isovertex trace (local/ + final/) as OFF/TXT files
+    bool foldover = false;         //!< Enable Stage 3: within-cycle fan foldover resolution
+    bool out_delv = false;         //!< Output Delaunay triangulation to delv_xxx.off
+    bool out_delv_has_bbox = false; //!< If true, crop Delaunay output to bounding box
+    double out_delv_bbox_min[3] = {0, 0, 0}; //!< Min corner of bounding box for -out_delv
+    double out_delv_bbox_max[3] = {0, 0, 0}; //!< Max corner of bounding box for -out_delv
     bool terse = false;            //!< Guard: print only vertices/triangles and output file
     bool timing_stats = false;     //!< Guard: print timing statistics at the end of the run
     bool refine_small_angles = false; //!< Guard: enable facet-centric surface refinement
@@ -50,8 +54,9 @@ struct VdcParam {
           supersample(false),
           position_delv_on_isov(false),
           position_multi_isov_on_delv(false),
-          reposition_multi_isovA(false),
-          reposition_multi_isovA_trace(false),
+          multi_isov_trace(false),
+          foldover(false),
+          out_delv(false),
           terse(false),
           timing_stats(false),
           refine_small_angles(false),
@@ -79,8 +84,9 @@ struct VdcParam {
         out << "  Supersample: " << (supersample ? "true" : "false") << "\n";
         out << "  Position DelV on IsoV: " << (position_delv_on_isov ? "true" : "false") << "\n";
         out << "  Position multi IsoV on DelV: " << (position_multi_isov_on_delv ? "true" : "false") << "\n";
-        out << "  Reposition multi IsoV A: " << (reposition_multi_isovA ? "true" : "false") << "\n";
-        out << "  Reposition multi IsoV A trace: " << (reposition_multi_isovA_trace ? "true" : "false") << "\n";
+        out << "  Multi IsoV trace: " << (multi_isov_trace ? "true" : "false") << "\n";
+        out << "  Foldover: " << (foldover ? "true" : "false") << "\n";
+        out << "  Out DelV: " << (out_delv ? "true" : "false") << "\n";
         out << "  Terse: " << (terse ? "true" : "false") << "\n";
         out << "  Timing stats: " << (timing_stats ? "true" : "false") << "\n";
         out << "  Supersample r: " << supersample_r << "\n";

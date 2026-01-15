@@ -22,9 +22,11 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 //! @brief Print program header
@@ -87,6 +89,97 @@ static std::string trace_config_tag(const VdcParam& param) {
     return out.str();
 }
 
+/**
+ * @brief Write Delaunay triangulation boundary facets to an OFF file.
+ *
+ * Outputs all finite triangular facets (boundary of the Delaunay tetrahedra).
+ * This lets users compare the isosurface mesh against the Delaunay structure.
+ *
+ * @param dt The Delaunay triangulation.
+ * @param filename Output filename.
+ * @param has_bbox If true, filter to only include facets within the bounding box.
+ * @param bbox_min Minimum corner of bounding box (x, y, z).
+ * @param bbox_max Maximum corner of bounding box (x, y, z).
+ */
+static void write_delv_off(
+    const Delaunay& dt,
+    const std::string& filename,
+    bool has_bbox = false,
+    const double* bbox_min = nullptr,
+    const double* bbox_max = nullptr
+) {
+    // Helper to check if a point is within the bounding box
+    auto in_bbox = [&](const Point& p) -> bool {
+        if (!has_bbox || !bbox_min || !bbox_max) return true;
+        return p.x() >= bbox_min[0] && p.x() <= bbox_max[0] &&
+               p.y() >= bbox_min[1] && p.y() <= bbox_max[1] &&
+               p.z() >= bbox_min[2] && p.z() <= bbox_max[2];
+    };
+
+    // Collect finite vertices that are in bbox and assign indices
+    std::unordered_map<Vertex_handle, int> vertex_index;
+    std::vector<Point> vertices;
+    int idx = 0;
+    for (auto vit = dt.finite_vertices_begin(); vit != dt.finite_vertices_end(); ++vit) {
+        if (in_bbox(vit->point())) {
+            vertex_index[vit] = idx++;
+            vertices.push_back(vit->point());
+        }
+    }
+
+    // Collect finite facets where all 3 vertices are in the bbox
+    std::vector<std::array<int, 3>> facets;
+    for (auto fit = dt.finite_facets_begin(); fit != dt.finite_facets_end(); ++fit) {
+        Cell_handle c = fit->first;
+        int i = fit->second;
+
+        std::array<int, 3> tri;
+        int ti = 0;
+        bool all_in_bbox = true;
+        for (int j = 0; j < 4; ++j) {
+            if (j == i) continue;
+            Vertex_handle vh = c->vertex(j);
+            if (dt.is_infinite(vh)) goto skip_facet;
+            auto it = vertex_index.find(vh);
+            if (it == vertex_index.end()) {
+                all_in_bbox = false;
+                break;
+            }
+            tri[ti++] = it->second;
+        }
+        if (!all_in_bbox) goto skip_facet;
+        // Sort triangle indices for consistent orientation
+        if (i % 2 == 0) {
+            std::swap(tri[0], tri[1]);
+        }
+        facets.push_back(tri);
+        skip_facet:;
+    }
+
+    std::ofstream out(filename);
+    if (!out) {
+        std::cerr << "Error: Failed to open " << filename << " for writing.\n";
+        return;
+    }
+
+    out << "OFF\n";
+    out << vertices.size() << " " << facets.size() << " 0\n";
+    out << std::setprecision(17);
+    for (const auto& p : vertices) {
+        out << p.x() << " " << p.y() << " " << p.z() << "\n";
+    }
+    for (const auto& f : facets) {
+        out << "3 " << f[0] << " " << f[1] << " " << f[2] << "\n";
+    }
+
+    std::cout << "Wrote Delaunay triangulation to: " << filename << " ("
+              << vertices.size() << " vertices, " << facets.size() << " facets)";
+    if (has_bbox) {
+        std::cout << " [cropped to bbox]";
+    }
+    std::cout << "\n";
+}
+
 static void dump_duplicate_isovertex_positions(
     const std::filesystem::path& trace_root,
     const DelaunayIsosurface& iso_surface
@@ -120,13 +213,17 @@ static void dump_duplicate_isovertex_positions(
     std::unordered_map<Key, std::vector<int>, KeyHash> groups;
     groups.reserve(iso_surface.isovertices.size());
 
+    // Quantize to ~8 decimal places (matching OFF file output precision)
+    // This ensures positions that appear identical after rounding are grouped
+    constexpr double QUANT = 1e8;
+
     const auto& s = iso_surface.vertex_scale;
     for (size_t i = 0; i < iso_surface.isovertices.size(); ++i) {
         const Point& p = iso_surface.isovertices[i];
         const Key k{
-            p.x() * s[0],
-            p.y() * s[1],
-            p.z() * s[2],
+            std::round(p.x() * s[0] * QUANT) / QUANT,
+            std::round(p.y() * s[1] * QUANT) / QUANT,
+            std::round(p.z() * s[2] * QUANT) / QUANT,
         };
         groups[k].push_back(static_cast<int>(i));
     }
@@ -351,6 +448,26 @@ int main(int argc, char* argv[]) {
         std::cout << "  Delaunay cells: " << dt.number_of_finite_cells() << "\n";
     }
 
+    // Optional: Output Delaunay triangulation to OFF file
+    if (param.out_delv) {
+        // Derive filename from mesh output: delv_<basename>.off or delv_<basename>_crop.off
+        std::string delv_filename;
+        {
+            std::filesystem::path mesh_path(param.output_filename);
+            std::string stem = mesh_path.stem().string();
+            if (stem.empty()) stem = "mesh";
+            if (param.out_delv_has_bbox) {
+                delv_filename = "delv_" + stem + "_crop.off";
+            } else {
+                delv_filename = "delv_" + stem + ".off";
+            }
+        }
+        write_delv_off(dt, delv_filename,
+                       param.out_delv_has_bbox,
+                       param.out_delv_bbox_min,
+                       param.out_delv_bbox_max);
+    }
+
     // ========================================================================
     // Step 6: Compute cell circumcenters and scalar values
     // ========================================================================
@@ -412,8 +529,8 @@ int main(int argc, char* argv[]) {
         std::cout << "Computing isovertex positions...\n";
     }
 
-    std::string reposition_multi_isovA_trace_dir;
-    if (param.reposition_multi_isovA_trace) {
+    std::string multi_isov_trace_dir;
+    if (param.multi_isov_trace) {
         // Root trace outputs at repo root, independent of the current working directory.
         std::filesystem::path repo_root;
         {
@@ -454,20 +571,20 @@ int main(int argc, char* argv[]) {
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         if (ec) {
-            std::cerr << "[DEL-SELFI-A-TRACE] Warning: failed to create directory: " << dir
+            std::cerr << "[DEL-SELFI-TRACE] Warning: failed to create directory: " << dir
                       << " (" << ec.message() << ")\n";
         } else {
-            reposition_multi_isovA_trace_dir = dir.string();
-            std::cerr << "[DEL-SELFI-A-TRACE] Dumping A trace under: " << reposition_multi_isovA_trace_dir
+            multi_isov_trace_dir = dir.string();
+            std::cerr << "[DEL-SELFI-TRACE] Dumping multi-isov trace under: " << multi_isov_trace_dir
                       << " (subdirs: local/, final/)\n";
         }
     }
 
     const CycleIsovertexOptions isovertex_options{
         param.position_multi_isov_on_delv,
-        param.reposition_multi_isovA,
-        param.reposition_multi_isovA_trace,
-        reposition_multi_isovA_trace_dir,
+        param.multi_isov_trace,
+        param.foldover,
+        multi_isov_trace_dir,
     };
 
     compute_cycle_isovertices(
@@ -489,9 +606,11 @@ int main(int argc, char* argv[]) {
     // Set vertex scale from physical spacing for correct output with non-uniform grids
     iso_surface.vertex_scale = {grid.physical_spacing[0], grid.physical_spacing[1], grid.physical_spacing[2]};
 
-    if (param.reposition_multi_isovA_trace && !reposition_multi_isovA_trace_dir.empty()) {
-        dump_duplicate_isovertex_positions(reposition_multi_isovA_trace_dir, iso_surface);
+    if (param.multi_isov_trace && !multi_isov_trace_dir.empty()) {
+        dump_duplicate_isovertex_positions(multi_isov_trace_dir, iso_surface);
     }
+
+    // maybe_trace_isovertex_stars(argv[0], param, dt, iso_surface); // TODO: implement or remove
 
     const size_t num_vertices = iso_surface.num_vertices();
     const size_t num_triangles = iso_surface.num_triangles();
