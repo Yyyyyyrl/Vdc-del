@@ -34,6 +34,9 @@ void print_help()
     std::cout << "                               Default: 20 (also used when -refine_small_angles is set without -min_angle/-max_angle).\n";
     std::cout << "  -max_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is above this threshold.\n";
     std::cout << "                               Default: off.\n";
+    std::cout << "  -flip_small_dihedral_cells  : Flip cell sign when a cell has 3/4 isosurface facets\n";
+    std::cout << "                               and any dihedral angle between those facets is below the threshold.\n";
+    std::cout << "  -cos_dihedral_angle_threshold {cos} : Cosine threshold for dihedral test (default: cos(5 deg)).\n";
     std::cout << "  -terse                      : Print only the number of vertices/triangles and the output file.\n";
     std::cout << "  -timing_stats               : Print timing statistics after the run.\n";
     std::cout << "  -debug                      : Enable debug logging ([DEBUG]/[ISO]/[ISO-MATCH]/[CYC-MOD]).\n";
@@ -165,6 +168,14 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
             vp.refine_max_surface_angle_deg = std::atof(argv[++i]);
             vp.refine_max_angle_enabled = true;
             vp.refine_small_angles = true;
+        }
+        else if (arg == "-flip_small_dihedral_cells")
+        {
+            vp.flip_small_dihedral_cells = true;
+        }
+        else if (arg == "-cos_dihedral_angle_threshold" && i + 1 < argc)
+        {
+            vp.cos_dihedral_angle_threshold = std::atof(argv[++i]);
         }
         else if (arg == "-terse")
         {

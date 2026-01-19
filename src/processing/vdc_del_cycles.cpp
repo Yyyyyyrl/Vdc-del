@@ -592,18 +592,22 @@ Point compute_centroid_of_voronoi_edge_and_isosurface(
         float sA = cellA->info().circumcenter_scalar;
         float sB = cellB->info().circumcenter_scalar;
 
-        // Delaunay facet is only marked isosurface on the positive-cell side, so
-        // (sA - sB) should be strictly positive.
-        const float denom = sA - sB;
-        if (denom <= 0.0f) {
-            throw std::runtime_error("Invalid circumcenter scalar ordering (denom <= 0).");
-        }
-
-        // Linear interpolation to find isosurface crossing point
-        // p = ((isovalue - sB) * wA + (sA - isovalue) * wB) / (sA - sB)
+        // Linear interpolation to find an isovalue crossing point on the Voronoi edge.
         //
-        // Using p = wA + t * (wB - wA) gives t = (sA - isovalue) / (sA - sB).
-        float t = (sA - isovalue) / denom;
+        // NOTE: In the standard pipeline, facets are marked only from the positive-cell
+        // side and (sA - sB) is strictly positive and the isovalue is bracketed.
+        // Some experimental pipelines may flip cell signs (without changing sA/sB),
+        // in which case the scalar ordering can be reversed or the isovalue may not be
+        // bracketed by sA and sB. Handle these cases deterministically by:
+        // - using the symmetric interpolation formula,
+        // - clamping t to [0,1] so the point lies on the segment between circumcenters.
+        const float denom = sB - sA;
+        float t = 0.5f;
+        if (std::fabs(denom) > 1e-20f) {
+            t = (isovalue - sA) / denom;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+        }
 
         // Interpolate position
         double px = wA.x() + t * (wB.x() - wA.x());
@@ -1444,65 +1448,8 @@ double compute_sphere_radius(
     const Delaunay& dt,
     const UnifiedGrid& grid
 ) {
-    // Make multi-cycle sphere radius sliver-aware.
-    // Base radius is proportional to min incident Delaunay edge length, deterministically
-    // shrink it in ill-conditioned neighborhoods in the delaunay triangulation(very small tetrahedron dihedral angles).
-
-    auto clamp_unit = [](double x) -> double {
-        if (x < -1.0) return -1.0;
-        if (x > 1.0) return 1.0;
-        return x;
-    };
-    auto vec_dot_local = [](const Vector3& a, const Vector3& b) -> double {
-        return a.x() * b.x() + a.y() * b.y() + a.z() * b.z();
-    };
-    auto vec_cross_local = [](const Vector3& a, const Vector3& b) -> Vector3 {
-        return Vector3(
-            a.y() * b.z() - a.z() * b.y(),
-            a.z() * b.x() - a.x() * b.z(),
-            a.x() * b.y() - a.y() * b.x());
-    };
-    auto vec_norm_local = [](const Vector3& v0) -> double {
-        return std::sqrt(v0.squared_length());
-    };
-    auto angle_between = [&](const Vector3& a, const Vector3& b) -> double {
-        const double na = vec_norm_local(a);
-        const double nb = vec_norm_local(b);
-        if (na < 1e-18 || nb < 1e-18) {
-            return 0.0;
-        }
-        const double c = clamp_unit(vec_dot_local(a, b) / (na * nb));
-        return std::acos(c);
-    };
-    auto outward_normal = [&](const Point& pi, const Point& pj, const Point& pk, const Point& pl) -> Vector3 {
-        Vector3 n = vec_cross_local(Vector3(pi, pj), Vector3(pi, pk));
-        // Ensure the normal points away from the opposite vertex (pl).
-        if (vec_dot_local(n, Vector3(pi, pl)) > 0.0) {
-            n = -n;
-        }
-        return n;
-    };
-    auto internal_dihedral_rad = [&](const Point& pi, const Point& pj, const Point& pk, const Point& pl) -> double {
-        // Dihedral angle along edge (pi,pj) between faces (pi,pj,pk) and (pi,pj,pl).
-        const Vector3 n1 = outward_normal(pi, pj, pk, pl);
-        const Vector3 n2 = outward_normal(pi, pj, pl, pk);
-        const double ang = angle_between(n1, n2); // angle between outward face normals
-        constexpr double kPi = 3.141592653589793238462643383279502884;
-        return kPi - ang;
-    };
-    auto min_cell_dihedral_deg = [&](const Point& p0, const Point& p1, const Point& p2, const Point& p3) -> double {
-        constexpr double kRadToDeg = 57.295779513082320876798154814105170332;
-        double m = std::numeric_limits<double>::infinity();
-        m = std::min(m, internal_dihedral_rad(p0, p1, p2, p3));
-        m = std::min(m, internal_dihedral_rad(p0, p2, p1, p3));
-        m = std::min(m, internal_dihedral_rad(p0, p3, p1, p2));
-        m = std::min(m, internal_dihedral_rad(p1, p2, p0, p3));
-        m = std::min(m, internal_dihedral_rad(p1, p3, p0, p2));
-        m = std::min(m, internal_dihedral_rad(p2, p3, p0, p1));
-        return m * kRadToDeg;
-    };
-
-    // Gather incident cells once (we need them for both min-edge and dihedral).
+    // Sphere radius for multi-cycle isovertex projection: proportional to the
+    // minimum incident Delaunay edge length at the site.
     std::vector<Cell_handle> incident_cells;
     incident_cells.reserve(128);
     dt.incident_cells(v, std::back_inserter(incident_cells));
@@ -1538,46 +1485,7 @@ double compute_sphere_radius(
         min_edge_length = grid_spacing;
     }
 
-    const double base_radius = 0.1 * min_edge_length;
-
-    // Compute minimum "cell min-dihedral" over incident cells (finite and non-dummy).
-    double theta_min_deg = std::numeric_limits<double>::infinity();
-    for (Cell_handle ch : incident_cells) {
-        if (ch == Cell_handle() || dt.is_infinite(ch)) {
-            continue;
-        }
-        bool has_dummy = false;
-        for (int i = 0; i < 4; ++i) {
-            Vertex_handle vh = ch->vertex(i);
-            if (vh == Vertex_handle() || dt.is_infinite(vh) || vh->info().is_dummy) {
-                has_dummy = true;
-                break;
-            }
-        }
-        if (has_dummy) {
-            continue;
-        }
-
-        Point p[4];
-        for (int i = 0; i < 4; ++i) {
-            p[i] = ch->vertex(i)->point();
-        }
-        theta_min_deg = std::min(theta_min_deg, min_cell_dihedral_deg(p[0], p[1], p[2], p[3]));
-    }
-
-    // Sliver-aware scale: shrink deterministically when theta_min is small.
-    // Constants are intentionally fixed (no "search") and conservative.
-    constexpr double THETA_REF_DEG = 10.0;
-    constexpr double R_MIN_FACTOR = 0.1;
-
-    double scale = 1.0;
-    if (std::isfinite(theta_min_deg) && THETA_REF_DEG > 0.0) {
-        scale = theta_min_deg / THETA_REF_DEG;
-        if (scale < R_MIN_FACTOR) scale = R_MIN_FACTOR;
-        if (scale > 1.0) scale = 1.0;
-    }
-
-    return base_radius * scale;
+    return 0.1 * min_edge_length;
 }
 
 // ============================================================================

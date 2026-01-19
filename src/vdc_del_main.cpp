@@ -264,6 +264,20 @@ int main(int argc, char* argv[]) {
 
     TimingStats::getInstance().stopTimer("CellProcessing", "Total");
 
+    // Optional: Flip cell signs to remove very small dihedral angles between isosurface facets.
+    if (param.flip_small_dihedral_cells) {
+        TimingStats::getInstance().startTimer("CellProcessing", "SmallDihedralFlip");
+        if (!param.terse) {
+            std::cout << "Flipping small-dihedral cells...\n";
+        }
+        const int flipped = flip_cell_signs_for_small_isofacet_dihedral(
+            dt, param.cos_dihedral_angle_threshold);
+        if (!param.terse) {
+            std::cout << "  Flipped " << flipped << " cells.\n";
+        }
+        TimingStats::getInstance().stopTimer("CellProcessing", "SmallDihedralFlip");
+    }
+
     // ========================================================================
     // Step 7: Mark isosurface facets
     // ========================================================================

@@ -86,6 +86,29 @@ void compute_cell_circumcenters_and_scalars(
 );
 
 /**
+ * @brief Flip cell signs to avoid very small dihedral angles between isosurface facets.
+ *
+ * For each finite Delaunay cell (tetrahedron), count the number of facets whose
+ * neighboring cell has opposite sign. If that count is 3 or 4, compute internal
+ * dihedral angles between the corresponding cell facets. If any dihedral angle
+ * is smaller than the threshold (equivalently, cosine is greater than the given
+ * cosine threshold), flip the sign of the cell's Voronoi vertex (circumcenter).
+ *
+ * Notes:
+ * - The flip decision is computed from the current cell signs and then applied
+ *   simultaneously to avoid order dependence.
+ * - Cells with dummy vertices or infinite neighbors are skipped.
+ *
+ * @param dt The Delaunay triangulation (must have cell signs computed first).
+ * @param cos_dihedral_angle_threshold Cosine threshold (default is cos(5 deg)).
+ * @return Number of flipped cells.
+ */
+int flip_cell_signs_for_small_isofacet_dihedral(
+    Delaunay& dt,
+    double cos_dihedral_angle_threshold
+);
+
+/**
  * @brief Mark Delaunay facets that cross the isosurface.
  *
  * A facet is marked as isosurface if it separates a positive cell from a negative cell.

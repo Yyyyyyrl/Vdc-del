@@ -662,15 +662,8 @@ void dump_multicycle_vertex_example_json(
         min_edge_length = 1.0;
     }
     const double sphere_radius_base = 0.1 * min_edge_length;
-    constexpr double kThetaRefDeg = 10.0;
-    constexpr double kRMinFactor = 0.1;
-    double sphere_radius_scale = 1.0;
-    if (std::isfinite(min_dihedral_deg) && kThetaRefDeg > 0.0) {
-        sphere_radius_scale = min_dihedral_deg / kThetaRefDeg;
-        if (sphere_radius_scale < kRMinFactor) sphere_radius_scale = kRMinFactor;
-        if (sphere_radius_scale > 1.0) sphere_radius_scale = 1.0;
-    }
-    const double sphere_radius = sphere_radius_base * sphere_radius_scale;
+    const double sphere_radius_scale = 1.0;
+    const double sphere_radius = sphere_radius_base;
     out << "  \"delaunay_neighborhood\": {\n";
     out << "    \"incident_cells_total\": " << incident_cells_total << ",\n";
     out << "    \"incident_cells_valid\": " << incident_cells_valid << ",\n";

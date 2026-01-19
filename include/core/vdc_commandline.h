@@ -35,6 +35,8 @@ struct VdcParam {
     bool refine_min_angle_enabled = false; //!< Guard: enable min-angle-driven refinement
     bool refine_max_angle_enabled = false; //!< Guard: enable max-angle-driven refinement
     bool mod_cyc = true;                   //!< Guard: run modify-cycles pass to fix non-manifolds (default: enabled)
+    bool flip_small_dihedral_cells = false; //!< Flip cell signs when 3/4 isosurface facets form small dihedrals
+    double cos_dihedral_angle_threshold = 0.9961946980917455; //!< Default: cos(5 degrees)
 
     // Debug/figure dumps (JSON)
     std::string dump_site_selection_json;  //!< If non-empty, dump active-cube site-selection data to JSON.
@@ -70,6 +72,8 @@ struct VdcParam {
           refine_min_angle_enabled(false),
           refine_max_angle_enabled(false),
           mod_cyc(true),
+          flip_small_dihedral_cells(false),
+          cos_dihedral_angle_threshold(0.9961946980917455),
           dump_site_selection_json(""),
           dump_facet_example_json(""),
           dump_multicycle_json(""),
@@ -107,6 +111,8 @@ struct VdcParam {
         out << "  Refine max surface angle (deg): " << refine_max_surface_angle_deg << "\n";
         out << "  Refine insert resolution: " << refine_insert_resolution << "\n";
         out << "  Mod cyc: " << (mod_cyc ? "true" : "false") << "\n";
+        out << "  Flip small-dihedral cells: " << (flip_small_dihedral_cells ? "true" : "false")
+            << " (cos_threshold=" << cos_dihedral_angle_threshold << ")\n";
     }
 };
 
