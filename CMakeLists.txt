@@ -63,7 +63,7 @@ set(CORE_SOURCES
     src/core/vdc_utilities.cpp
     src/core/vdc_stats.cpp
     src/core/vdc_timing.cpp
-    src/core/vdc_debug.cpp
+    src/vdc_debug.cpp
 )
 
 # ─── Processing source files ─────────────────────────────────────────────────

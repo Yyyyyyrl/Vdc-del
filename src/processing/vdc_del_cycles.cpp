@@ -27,119 +27,6 @@
 #include <CGAL/squared_distance_3.h>
 
 // ============================================================================
-// Debug/trace helpers (self-intersection)
-// ============================================================================
-
-static const std::unordered_set<int>& trace_selfi_vertices() {
-    static std::unordered_set<int> traced;
-    static bool initialized = false;
-    if (initialized) {
-        return traced;
-    }
-    initialized = true;
-
-    auto insert_int = [&](const std::string& token) {
-        try {
-            size_t pos = 0;
-            const int v = std::stoi(token, &pos);
-            if (pos == token.size()) {
-                traced.insert(v);
-            }
-        } catch (...) {
-            // Ignore malformed tokens.
-        }
-    };
-
-    if (const char* env = std::getenv("VDC_TRACE_SELFI_VERTICES")) {
-        std::stringstream ss(env);
-        std::string tok;
-        while (std::getline(ss, tok, ',')) {
-            if (!tok.empty()) {
-                insert_int(tok);
-            }
-        }
-        return traced;
-    }
-
-    if (const char* env = std::getenv("VDC_TRACE_SELFI_VERTEX")) {
-        insert_int(env);
-    }
-
-    return traced;
-}
-
-static bool trace_selfi_enabled(const int vertex_index) {
-    const auto& traced = trace_selfi_vertices();
-    return (!traced.empty()) && (traced.find(vertex_index) != traced.end());
-}
-
-static const std::string& trace_selfi_dump_dir() {
-    static std::string dir;
-    static bool initialized = false;
-    if (initialized) {
-        return dir;
-    }
-    initialized = true;
-    if (const char* env = std::getenv("VDC_TRACE_SELFI_DUMP_DIR")) {
-        dir = env;
-    }
-    return dir;
-}
-
-static bool log_unresolved_A_vertices() {
-    static int cached = -1;
-    if (cached >= 0) {
-        return cached != 0;
-    }
-    const char* env = std::getenv("VDC_LOG_UNRESOLVED_A");
-    if (!env || env[0] == '\0') {
-        cached = 0;
-        return false;
-    }
-    cached = (std::strcmp(env, "0") == 0) ? 0 : 1;
-    return cached != 0;
-}
-
-static bool log_selfi_within_cycle_vertices() {
-    static int cached = -1;
-    if (cached >= 0) {
-        return cached != 0;
-    }
-    const char* env = std::getenv("VDC_LOG_SELFI_WITHIN");
-    if (!env || env[0] == '\0') {
-        cached = 0;
-        return false;
-    }
-    cached = (std::strcmp(env, "0") == 0) ? 0 : 1;
-    return cached != 0;
-}
-
-static bool trace_selfi_intersection_details_enabled() {
-    static int cached = -1;
-    if (cached >= 0) {
-        return cached != 0;
-    }
-    const char* env = std::getenv("VDC_TRACE_SELFI_INTERSECTION_DETAILS");
-    if (!env || env[0] == '\0') {
-        cached = 0;
-        return false;
-    }
-    cached = (std::strcmp(env, "0") == 0) ? 0 : 1;
-    return cached != 0;
-}
-
-static std::filesystem::path selfi_dump_path_for_vertex(
-    const int vertex_index,
-    const char* stage,
-    const char* suffix
-) {
-    const std::filesystem::path base(trace_selfi_dump_dir());
-    std::ostringstream name;
-    name << "selfi_v" << vertex_index << "_" << stage << suffix;
-    return base / name.str();
-}
-
-// ============================================================================
 // Helper: Build cell index lookup
 // ============================================================================
 
@@ -1379,8 +1266,8 @@ bool check_self_intersection(
     const std::vector<Cell_handle>& cell_by_index
 ) {
     const int v_idx = v->info().index;
-    const bool trace_details = trace_selfi_enabled(v_idx) && trace_selfi_intersection_details_enabled();
-    const bool log_within = log_selfi_within_cycle_vertices();
+    const bool trace_details = vdc_debug::trace_selfi_enabled(v_idx) && vdc_debug::trace_selfi_intersection_details_enabled();
+    const bool log_within = vdc_debug::log_selfi_within_cycle_vertices();
 
     auto kind_name = [](TriIntersectionKind k) -> const char* {
         switch (k) {
@@ -1550,760 +1437,6 @@ static std::optional<SelfIntersectionWitness> find_self_intersection_witness(
     }
 
     return std::nullopt;
-}
-
-static bool write_vtk_selfi_local_triangles(
-    const std::filesystem::path& path,
-    const std::vector<std::vector<Triangle_3>>& cycle_triangles
-) {
-    size_t num_polys = 0;
-    for (const auto& tris : cycle_triangles) {
-        num_polys += tris.size();
-    }
-    const size_t num_points = num_polys * 3;
-
-    std::ofstream out(path);
-    if (!out) {
-        return false;
-    }
-
-    out << "# vtk DataFile Version 3.0\n";
-    out << "vdc-del self-intersection local fan\n";
-    out << "ASCII\n";
-    out << "DATASET POLYDATA\n";
-    out << "POINTS " << num_points << " float\n";
-
-    for (const auto& tris : cycle_triangles) {
-        for (const auto& tri : tris) {
-            for (int k = 0; k < 3; ++k) {
-                const Point p = tri.vertex(k);
-                out << static_cast<float>(p.x()) << " "
-                    << static_cast<float>(p.y()) << " "
-                    << static_cast<float>(p.z()) << "\n";
-            }
-        }
-    }
-
-    out << "POLYGONS " << num_polys << " " << (num_polys * 4) << "\n";
-    size_t poly_idx = 0;
-    for (const auto& tris : cycle_triangles) {
-        for (size_t t = 0; t < tris.size(); ++t) {
-            const size_t base = poly_idx * 3;
-            out << "3 " << base << " " << (base + 1) << " " << (base + 2) << "\n";
-            ++poly_idx;
-        }
-    }
-
-    out << "CELL_DATA " << num_polys << "\n";
-    out << "SCALARS cycle int 1\n";
-    out << "LOOKUP_TABLE default\n";
-    for (size_t c = 0; c < cycle_triangles.size(); ++c) {
-        for (size_t t = 0; t < cycle_triangles[c].size(); ++t) {
-            out << static_cast<int>(c) << "\n";
-        }
-    }
-
-    return true;
-}
-
-static bool write_vtk_selfi_points(
-    const std::filesystem::path& path,
-    Vertex_handle v,
-    const std::vector<Point>& cycle_isovertices
-) {
-    const int num_cycles = static_cast<int>(cycle_isovertices.size());
-    const int num_points = num_cycles + 1; // includes center
-
-    std::ofstream out(path);
-    if (!out) {
-        return false;
-    }
-
-    out << "# vtk DataFile Version 3.0\n";
-    out << "vdc-del self-intersection points\n";
-    out << "ASCII\n";
-    out << "DATASET POLYDATA\n";
-    out << "POINTS " << num_points << " float\n";
-
-    const Point center = v->point();
-    out << static_cast<float>(center.x()) << " "
-        << static_cast<float>(center.y()) << " "
-        << static_cast<float>(center.z()) << "\n";
-
-    for (int c = 0; c < num_cycles; ++c) {
-        const Point p = cycle_isovertices[static_cast<size_t>(c)];
-        out << static_cast<float>(p.x()) << " "
-            << static_cast<float>(p.y()) << " "
-            << static_cast<float>(p.z()) << "\n";
-    }
-
-    out << "VERTICES " << num_points << " " << (num_points * 2) << "\n";
-    for (int i = 0; i < num_points; ++i) {
-        out << "1 " << i << "\n";
-    }
-
-    out << "POINT_DATA " << num_points << "\n";
-    out << "SCALARS cycle int 1\n";
-    out << "LOOKUP_TABLE default\n";
-    out << "-1\n"; // center
-    for (int c = 0; c < num_cycles; ++c) {
-        out << c << "\n";
-    }
-
-    return true;
-}
-
-static void maybe_dump_selfi_stage(
-    const Delaunay& dt,
-    Vertex_handle v,
-    const std::vector<Point>& cycle_isovertices,
-    const std::vector<Cell_handle>& cell_by_index,
-    const char* stage
-) {
-    const int idx = v->info().index;
-    if (!trace_selfi_enabled(idx)) {
-        return;
-    }
-    const std::string& dir = trace_selfi_dump_dir();
-    if (dir.empty()) {
-        return;
-    }
-
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    if (ec) {
-        return;
-    }
-
-    const auto& cycles = v->info().facet_cycles;
-    std::vector<std::vector<Triangle_3>> cycle_triangles(cycles.size());
-    for (size_t c = 0; c < cycles.size(); ++c) {
-        cycle_triangles[c] = collect_cycle_triangles(
-            dt, v, static_cast<int>(c), cycle_isovertices[c], cell_by_index);
-    }
-
-    (void)write_vtk_selfi_local_triangles(
-        selfi_dump_path_for_vertex(idx, stage, ".vtk"), cycle_triangles);
-    (void)write_vtk_selfi_points(
-        selfi_dump_path_for_vertex(idx, stage, "_points.vtk"), v, cycle_isovertices);
-}
-
-static void maybe_dump_selfi_cycle_metadata(
-    const Delaunay& dt,
-    Vertex_handle v,
-    const std::vector<Cell_handle>& cell_by_index
-) {
-    const int idx = v->info().index;
-    if (!trace_selfi_enabled(idx)) {
-        return;
-    }
-    const std::string& dir = trace_selfi_dump_dir();
-    if (dir.empty()) {
-        return;
-    }
-
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    if (ec) {
-        return;
-    }
-
-    const std::filesystem::path path = selfi_dump_path_for_vertex(idx, "cycles", ".txt");
-    std::ofstream out(path);
-    if (!out) {
-        return;
-    }
-
-    const Point center = v->point();
-    out << "vertex_index: " << idx << "\n";
-    out << "center: " << center.x() << " " << center.y() << " " << center.z() << "\n";
-    out << "num_cycles: " << v->info().facet_cycles.size() << "\n";
-
-    for (size_t c = 0; c < v->info().facet_cycles.size(); ++c) {
-        const auto& cycle = v->info().facet_cycles[c];
-
-        std::unordered_set<int> boundary_indices;
-        std::vector<int> boundary_delv;
-        boundary_indices.reserve(cycle.size() * 2);
-        boundary_delv.reserve(cycle.size() * 2);
-
-        for (const auto& [cell_idx, facet_idx] : cycle) {
-            Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
-            if (cell == Cell_handle()) {
-                continue;
-            }
-            if (dt.is_infinite(cell)) {
-                continue;
-            }
-            if (facet_idx < 0 || facet_idx >= 4) {
-                continue;
-            }
-
-            for (int j = 0; j < 4; ++j) {
-                if (j == facet_idx) {
-                    continue;
-                }
-                Vertex_handle vh = cell->vertex(j);
-                if (vh == v) {
-                    continue;
-                }
-                if (dt.is_infinite(vh) || vh->info().is_dummy) {
-                    continue;
-                }
-                const int delv_idx = vh->info().index;
-                if (boundary_indices.insert(delv_idx).second) {
-                    boundary_delv.push_back(delv_idx);
-                }
-            }
-        }
-
-        out << "\ncycle " << c << ":\n";
-        out << "  num_facets: " << cycle.size() << "\n";
-        out << "  boundary_delv_count: " << boundary_delv.size() << "\n";
-        out << "  boundary_delv_indices:";
-        for (int delv_idx : boundary_delv) {
-            out << " " << delv_idx;
-        }
-        out << "\n";
-        out << "  facets (cell_index,facet_index):\n";
-        for (const auto& [cell_idx, facet_idx] : cycle) {
-            out << "    " << cell_idx << " " << facet_idx << "\n";
-        }
-    }
-}
-
-// ============================================================================
-// Dump helpers: simple_multi_failures-style OFF/TXT for unresolved A vertices
-// ============================================================================
-
-struct IsovertexKey {
-    int delv = -1;
-    int cycle = -1;
-
-    bool operator==(const IsovertexKey& o) const noexcept {
-        return delv == o.delv && cycle == o.cycle;
-    }
-};
-
-struct IsovertexKeyHash {
-    size_t operator()(const IsovertexKey& k) const noexcept {
-        // Deterministic 64-bit combine.
-        const uint64_t a = static_cast<uint64_t>(static_cast<uint32_t>(k.delv));
-        const uint64_t b = static_cast<uint64_t>(static_cast<uint32_t>(k.cycle));
-        const uint64_t x = (a << 32) ^ b;
-        return static_cast<size_t>(x ^ (x >> 33));
-    }
-};
-
-struct KeyedTriangle {
-    std::array<IsovertexKey, 3> key;
-    std::array<Point, 3> p;
-};
-
-static std::vector<KeyedTriangle> collect_cycle_triangles_keyed(
-    const Delaunay& dt,
-    Vertex_handle v,
-    int cycle_idx,
-    const Point& cycle_isovertex,
-    const std::vector<Cell_handle>& cell_by_index
-) {
-    std::vector<KeyedTriangle> triangles;
-    const auto& cycles = v->info().facet_cycles;
-
-    if (cycle_idx < 0 || cycle_idx >= static_cast<int>(cycles.size())) {
-        return triangles;
-    }
-
-    const int v_idx = v->info().index;
-    const auto& cycle_facets = cycles[cycle_idx];
-    triangles.reserve(cycle_facets.size());
-
-    for (const auto& [cell_idx, facet_idx] : cycle_facets) {
-        Cell_handle ch = lookup_cell(cell_by_index, cell_idx);
-        if (ch == Cell_handle()) {
-            continue;
-        }
-
-        // Facet facet_idx is opposite vertex facet_idx, so its 3 vertices are
-        // at indices (facet_idx+1)%4, (facet_idx+2)%4, (facet_idx+3)%4.
-        Vertex_handle other_verts[2] = {Vertex_handle(), Vertex_handle()};
-        int other_slots[2] = {-1, -1};
-        int other_count = 0;
-        for (int t = 0; t < 3; ++t) {
-            const int cell_vertex_idx = (facet_idx + 1 + t) % 4;
-            Vertex_handle vh = ch->vertex(cell_vertex_idx);
-            if (vh == v) {
-                continue;
-            }
-            if (other_count < 2) {
-                other_verts[other_count] = vh;
-                other_slots[other_count] = t;
-            }
-            ++other_count;
-        }
-
-        // The facet should contain v (exactly one of the 3 vertices), leaving exactly 2 others.
-        if (other_count != 2) {
-            continue;
-        }
-
-        Vertex_handle v1 = other_verts[0];
-        Vertex_handle v2 = other_verts[1];
-
-        // Find cycle for v1 containing this facet
-        int c1 = -1;
-        if (facet_idx >= 0 && facet_idx < 4 &&
-            other_slots[0] >= 0 && other_slots[0] < 3) {
-            c1 = ch->info().facet_info[facet_idx].dualCellEdgeIndex[other_slots[0]];
-        }
-        if (c1 < 0) {
-            c1 = find_cycle_containing_facet(v1, cell_idx, facet_idx);
-        }
-
-        // Find cycle for v2 containing this facet
-        int c2 = -1;
-        if (facet_idx >= 0 && facet_idx < 4 &&
-            other_slots[1] >= 0 && other_slots[1] < 3) {
-            c2 = ch->info().facet_info[facet_idx].dualCellEdgeIndex[other_slots[1]];
-        }
-        if (c2 < 0) {
-            c2 = find_cycle_containing_facet(v2, cell_idx, facet_idx);
-        }
-
-        if (c1 < 0 || c2 < 0) {
-            continue;
-        }
-        if (c1 >= static_cast<int>(v1->info().cycle_isovertices.size()) ||
-            c2 >= static_cast<int>(v2->info().cycle_isovertices.size())) {
-            continue;
-        }
-
-        const int v1_idx = v1->info().index;
-        const int v2_idx = v2->info().index;
-        const Point p2 = v1->info().cycle_isovertices[c1];
-        const Point p3 = v2->info().cycle_isovertices[c2];
-
-        KeyedTriangle tri;
-        tri.key = {
-            IsovertexKey{v_idx, cycle_idx},
-            IsovertexKey{v1_idx, c1},
-            IsovertexKey{v2_idx, c2},
-        };
-        tri.p = {cycle_isovertex, p2, p3};
-        triangles.push_back(std::move(tri));
-    }
-
-    return triangles;
-}
-
-static std::vector<std::vector<KeyedTriangle>> collect_selfi_cycle_triangles_keyed(
-    const Delaunay& dt,
-    Vertex_handle v,
-    const std::vector<Point>& cycle_isovertices,
-    const std::vector<Cell_handle>& cell_by_index
-) {
-    const auto& cycles = v->info().facet_cycles;
-    std::vector<std::vector<KeyedTriangle>> cycle_triangles(cycles.size());
-    for (size_t c = 0; c < cycles.size(); ++c) {
-        if (c >= cycle_isovertices.size()) {
-            break;
-        }
-        cycle_triangles[c] = collect_cycle_triangles_keyed(
-            dt, v, static_cast<int>(c), cycle_isovertices[c], cell_by_index);
-    }
-    return cycle_triangles;
-}
-
-static bool write_off_keyed_triangles(
-    const std::filesystem::path& path,
-    const std::vector<KeyedTriangle>& triangles
-) {
-    std::ofstream out(path);
-    if (!out) {
-        return false;
-    }
-
-    std::vector<Point> vertices;
-    vertices.reserve(triangles.size() * 3);
-
-    std::unordered_map<IsovertexKey, size_t, IsovertexKeyHash> vtx_index;
-    vtx_index.reserve(triangles.size() * 3);
-
-    std::vector<std::array<size_t, 3>> faces;
-    faces.reserve(triangles.size());
-
-    for (const auto& tri : triangles) {
-        std::array<size_t, 3> f{};
-        for (int k = 0; k < 3; ++k) {
-            const IsovertexKey key = tri.key[k];
-            const auto it = vtx_index.find(key);
-            if (it != vtx_index.end()) {
-                f[static_cast<size_t>(k)] = it->second;
-                continue;
-            }
-
-            const size_t idx = vertices.size();
-            vertices.push_back(tri.p[k]);
-            vtx_index.emplace(key, idx);
-            f[static_cast<size_t>(k)] = idx;
-        }
-        faces.push_back(f);
-    }
-
-    out << "OFF\n";
-    out << vertices.size() << " " << faces.size() << " 0\n";
-    out << std::setprecision(17);
-
-    for (const Point p : vertices) {
-        out << p.x() << " " << p.y() << " " << p.z() << "\n";
-    }
-
-    for (const auto& f : faces) {
-        out << "3 " << f[0] << " " << f[1] << " " << f[2] << "\n";
-    }
-
-    return true;
-}
-
-static bool cycle_triangles_have_within_cycle_intersection(
-    const std::vector<std::vector<Triangle_3>>& cycle_triangles
-) {
-    for (const auto& tris : cycle_triangles) {
-        for (size_t i = 0; i < tris.size(); ++i) {
-            for (size_t j = i + 1; j < tris.size(); ++j) {
-                if (triangles_have_nontrivial_intersection(tris[i], tris[j])) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-static std::optional<std::pair<int, int>> first_between_cycle_intersection_pair(
-    const std::vector<std::vector<Triangle_3>>& cycle_triangles
-) {
-    for (size_t i = 0; i < cycle_triangles.size(); ++i) {
-        for (size_t j = i + 1; j < cycle_triangles.size(); ++j) {
-            for (const auto& t1 : cycle_triangles[i]) {
-                for (const auto& t2 : cycle_triangles[j]) {
-                    if (triangles_have_nontrivial_intersection(t1, t2)) {
-                        return std::pair<int, int>(static_cast<int>(i), static_cast<int>(j));
-                    }
-                }
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-static Point reflect_through_center(const Point& center, const Point& p);
-static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
-    Vertex_handle v,
-    std::vector<Point>& cycle_isovertices,
-    const Delaunay& dt,
-    const std::vector<Cell_handle>& cell_by_index,
-    std::vector<Point>* geometric_attempt_positions_out
-);
-
-struct SelfIntersectionWitnessTrace {
-    int cycle0 = -1;
-    int cycle1 = -1;
-    size_t tri0 = 0;
-    size_t tri1 = 0;
-    TriIntersectionTrace trace;
-};
-
-static std::optional<SelfIntersectionWitnessTrace> first_within_cycle_intersection_trace(
-    const std::vector<std::vector<Triangle_3>>& cycle_triangles
-) {
-    for (size_t c = 0; c < cycle_triangles.size(); ++c) {
-        const auto& tris = cycle_triangles[c];
-        for (size_t i = 0; i < tris.size(); ++i) {
-            for (size_t j = i + 1; j < tris.size(); ++j) {
-                TriIntersectionTrace trace;
-                if (triangles_have_nontrivial_intersection(tris[i], tris[j], &trace)) {
-                    return SelfIntersectionWitnessTrace{
-                        static_cast<int>(c), static_cast<int>(c), i, j, trace};
-                }
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-static std::optional<SelfIntersectionWitnessTrace> first_between_cycle_intersection_trace(
-    const std::vector<std::vector<Triangle_3>>& cycle_triangles
-) {
-    for (size_t c0 = 0; c0 < cycle_triangles.size(); ++c0) {
-        for (size_t c1 = c0 + 1; c1 < cycle_triangles.size(); ++c1) {
-            for (size_t i = 0; i < cycle_triangles[c0].size(); ++i) {
-                for (size_t j = 0; j < cycle_triangles[c1].size(); ++j) {
-                    TriIntersectionTrace trace;
-                    if (triangles_have_nontrivial_intersection(
-                            cycle_triangles[c0][i], cycle_triangles[c1][j], &trace)) {
-                        return SelfIntersectionWitnessTrace{
-                            static_cast<int>(c0), static_cast<int>(c1), i, j, trace};
-                    }
-                }
-            }
-        }
-    }
-    return std::nullopt;
-}
-
-static bool write_simple_multi_failure_summary_txt(
-    const std::filesystem::path& path,
-    Vertex_handle v,
-    const std::vector<Point>& cycle_isovertices,
-    const std::vector<std::vector<Triangle_3>>& cycle_triangles
-) {
-    std::ofstream out(path);
-    if (!out) {
-        return false;
-    }
-
-    const int vertex_index = v->info().index;
-    const Point center = v->point();
-    const auto& cycles = v->info().facet_cycles;
-
-    out << std::setprecision(17);
-    out << "vertex_index " << vertex_index << "\n";
-    out << "center " << center.x() << " " << center.y() << " " << center.z() << "\n";
-    out << "num_cycles " << cycles.size() << "\n";
-
-    for (size_t c = 0; c < cycles.size(); ++c) {
-        const size_t facet_count = cycles[c].size();
-        const Point p = (c < cycle_isovertices.size()) ? cycle_isovertices[c] : center;
-        out << "cycle " << c << " facet_count " << facet_count << " isov "
-            << p.x() << " " << p.y() << " " << p.z() << "\n";
-    }
-
-    auto kind_name = [](TriIntersectionKind k) -> const char* {
-        switch (k) {
-            case TriIntersectionKind::NONE: return "NONE";
-            case TriIntersectionKind::DISJOINT_TRIANGLE_TRIANGLE: return "DISJOINT_TRIANGLE_TRIANGLE";
-            case TriIntersectionKind::SHARED_VERTEX_T1_OPPOSITE_SEGMENT: return "SHARED_VERTEX_T1_OPPOSITE_SEGMENT";
-            case TriIntersectionKind::SHARED_VERTEX_T2_OPPOSITE_SEGMENT: return "SHARED_VERTEX_T2_OPPOSITE_SEGMENT";
-            case TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T1_0: return "SHARED_VERTEX_INTERIOR_SEGMENT_T1_0";
-            case TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T1_1: return "SHARED_VERTEX_INTERIOR_SEGMENT_T1_1";
-            case TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T2_0: return "SHARED_VERTEX_INTERIOR_SEGMENT_T2_0";
-            case TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T2_1: return "SHARED_VERTEX_INTERIOR_SEGMENT_T2_1";
-            default: return "UNKNOWN";
-        }
-    };
-
-    auto dump_tri = [&](const char* label, const Triangle_3& t) {
-        out << label << " "
-            << t.vertex(0).x() << " " << t.vertex(0).y() << " " << t.vertex(0).z() << "  "
-            << t.vertex(1).x() << " " << t.vertex(1).y() << " " << t.vertex(1).z() << "  "
-            << t.vertex(2).x() << " " << t.vertex(2).y() << " " << t.vertex(2).z() << "\n";
-    };
-
-    const bool within = cycle_triangles_have_within_cycle_intersection(cycle_triangles);
-    const auto between_pair = first_between_cycle_intersection_pair(cycle_triangles);
-
-    std::vector<std::pair<int, int>> coincident_cycles;
-    {
-        const size_t n = std::min(cycles.size(), cycle_isovertices.size());
-        for (size_t a = 0; a < n; ++a) {
-            for (size_t b = a + 1; b < n; ++b) {
-                if (cycle_isovertices[a] == cycle_isovertices[b]) {
-                    coincident_cycles.emplace_back(static_cast<int>(a), static_cast<int>(b));
-                }
-            }
-        }
-    }
-
-    const bool any = within || between_pair.has_value() || !coincident_cycles.empty();
-
-    out << "self_intersection_any " << (any ? 1 : 0) << "\n";
-    if (!coincident_cycles.empty()) {
-        out << "self_intersection_coincident_isovertices\n";
-        for (const auto& p : coincident_cycles) {
-            out << "coincident_cycles " << p.first << "-" << p.second << "\n";
-        }
-    }
-
-    const auto within_witness = first_within_cycle_intersection_trace(cycle_triangles);
-    if (within) {
-        out << "self_intersection_within_cycles\n";
-    }
-    if (within_witness) {
-        out << "within_witness cycle " << within_witness->cycle0
-            << " tri(" << within_witness->tri0 << "," << within_witness->tri1 << ")"
-            << " kind=" << kind_name(within_witness->trace.kind)
-            << " shared_count=" << within_witness->trace.shared_count
-            << " shared_point=(" << within_witness->trace.shared_point.x()
-            << "," << within_witness->trace.shared_point.y()
-            << "," << within_witness->trace.shared_point.z() << ")\n";
-        const Triangle_3& t0 = cycle_triangles[static_cast<size_t>(within_witness->cycle0)][within_witness->tri0];
-        const Triangle_3& t1 = cycle_triangles[static_cast<size_t>(within_witness->cycle1)][within_witness->tri1];
-        dump_tri("within_tri0", t0);
-        dump_tri("within_tri1", t1);
-    }
-
-    const auto between_witness = first_between_cycle_intersection_trace(cycle_triangles);
-    if (between_pair) {
-        out << "self_intersection_between_cycles " << between_pair->first << "-" << between_pair->second << "\n";
-    }
-    if (between_witness) {
-        out << "between_witness cycle(" << between_witness->cycle0 << "," << between_witness->cycle1 << ")"
-            << " tri(" << between_witness->tri0 << "," << between_witness->tri1 << ")"
-            << " kind=" << kind_name(between_witness->trace.kind)
-            << " shared_count=" << between_witness->trace.shared_count
-            << " shared_point=(" << between_witness->trace.shared_point.x()
-            << "," << between_witness->trace.shared_point.y()
-            << "," << between_witness->trace.shared_point.z() << ")\n";
-        const Triangle_3& t0 = cycle_triangles[static_cast<size_t>(between_witness->cycle0)][between_witness->tri0];
-        const Triangle_3& t1 = cycle_triangles[static_cast<size_t>(between_witness->cycle1)][between_witness->tri1];
-        dump_tri("between_tri0", t0);
-        dump_tri("between_tri1", t1);
-    }
-
-    return true;
-}
-
-static void dump_simple_multi_failure_stage(
-    const std::filesystem::path& out_dir,
-    Vertex_handle v,
-    const std::vector<Point>& cycle_isovertices,
-    const Delaunay& dt,
-    const std::vector<Cell_handle>& cell_by_index,
-    const char* stage
-) {
-    const int vertex_index = v->info().index;
-    const size_t num_cycles = v->info().facet_cycles.size();
-
-    std::error_code ec;
-    std::filesystem::create_directories(out_dir, ec);
-    if (ec) {
-        return;
-    }
-
-    std::ostringstream base;
-    base << "selfi_v" << vertex_index << "_c" << num_cycles << "_" << stage;
-    const std::string prefix = base.str();
-
-    const auto cycle_tris_keyed = collect_selfi_cycle_triangles_keyed(dt, v, cycle_isovertices, cell_by_index);
-    std::vector<std::vector<Triangle_3>> cycle_triangles(cycle_tris_keyed.size());
-    for (size_t c = 0; c < cycle_tris_keyed.size(); ++c) {
-        cycle_triangles[c].reserve(cycle_tris_keyed[c].size());
-        for (const auto& tri : cycle_tris_keyed[c]) {
-            cycle_triangles[c].push_back(Triangle_3(tri.p[0], tri.p[1], tri.p[2]));
-        }
-    }
-
-    (void)write_simple_multi_failure_summary_txt(out_dir / (prefix + ".txt"), v, cycle_isovertices, cycle_triangles);
-
-    std::vector<KeyedTriangle> all_tris;
-    size_t total = 0;
-    for (const auto& tris : cycle_tris_keyed) {
-        total += tris.size();
-    }
-    all_tris.reserve(total);
-    for (const auto& tris : cycle_tris_keyed) {
-        all_tris.insert(all_tris.end(), tris.begin(), tris.end());
-    }
-
-    (void)write_off_keyed_triangles(out_dir / (prefix + "_all.off"), all_tris);
-
-    for (size_t c = 0; c < cycle_tris_keyed.size(); ++c) {
-        std::ostringstream name;
-        name << prefix << "_cycle" << c << ".off";
-        (void)write_off_keyed_triangles(out_dir / name.str(), cycle_tris_keyed[c]);
-    }
-}
-
-static void dump_multi_isov_trace_case(
-    const std::filesystem::path& out_dir,
-    Vertex_handle v,
-    const std::vector<Point>& baseline_positions,
-    const Delaunay& dt,
-    const std::vector<Cell_handle>& cell_by_index
-) {
-    dump_simple_multi_failure_stage(out_dir, v, baseline_positions, dt, cell_by_index, "baseline");
-
-    const int num_cycles = static_cast<int>(baseline_positions.size());
-    if (num_cycles < 2) {
-        return;
-    }
-
-    const Point center = v->point();
-
-    // For 2-cycle vertices, dump the deterministic A-only reflection candidates.
-    if (num_cycles == 2) {
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, baseline_positions[1]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_A");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[1] = reflect_through_center(center, baseline_positions[0]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_B");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, baseline_positions[0]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self0");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[1] = reflect_through_center(center, baseline_positions[1]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self1");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, baseline_positions[0]);
-            cand[1] = reflect_through_center(center, baseline_positions[1]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self_both");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, baseline_positions[1]);
-            cand[1] = reflect_through_center(center, baseline_positions[0]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_cross_both");
-        }
-    } else {
-        // For 3+ cycles, dump per-cycle self-reflections as a simple candidate set.
-        for (int c = 0; c < num_cycles; ++c) {
-            std::vector<Point> cand = baseline_positions;
-            cand[static_cast<size_t>(c)] = reflect_through_center(center, baseline_positions[static_cast<size_t>(c)]);
-            std::ostringstream stage;
-            stage << "reflect_cycle" << c;
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, stage.str().c_str());
-        }
-
-        // Also dump the cross-reflection candidates used by the A-only deterministic fallback.
-        for (int a = 0; a < num_cycles; ++a) {
-            for (int b = 0; b < num_cycles; ++b) {
-                if (a == b) continue;
-                std::vector<Point> cand = baseline_positions;
-                cand[static_cast<size_t>(a)] =
-                    reflect_through_center(center, baseline_positions[static_cast<size_t>(b)]);
-                std::ostringstream stage;
-                stage << "reflect_cycle" << a << "_from" << b;
-                dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, stage.str().c_str());
-            }
-        }
-    }
-
-    // Dump the deterministic pairwise pass attempt (for n>=2). This is a pure function
-    // of `baseline_positions` and the current neighborhood state.
-    {
-        std::vector<Point> attempt = baseline_positions;
-        std::vector<Point> attempt_out;
-        (void)try_resolve_multicycle_by_cycle_separation_tests(
-            v,
-            attempt,
-            dt,
-            cell_by_index,
-            &attempt_out);
-        if (!attempt_out.empty()) {
-            dump_simple_multi_failure_stage(out_dir, v, attempt_out, dt, cell_by_index, "pairwise_attempt");
-        }
-    }
 }
 
 double compute_sphere_radius(
@@ -2622,7 +1755,7 @@ static bool try_separate_cycle_pair_positions_A(
     new_vposA = vposA;
     new_vposB = vposB;
 
-    const bool trace = trace_selfi_enabled(v0->info().index);
+    const bool trace = vdc_debug::trace_selfi_enabled(v0->info().index);
 
     // First check: do current positions already satisfy bisecting plane separation?
     if (bisecting_plane_separates_cycle_boundaries(cycleA, cycleB, vposA, vposB)) {
@@ -2719,7 +1852,7 @@ static bool try_separate_cycle_pair_positions_A(
 // Multi-cycle resolution
 // ============================================================================
 
-static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
+ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
@@ -2744,7 +1877,7 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     // For 2-cycle vertices, try both reflection directions and pick the one that actually
     // resolves (or strictly reduces) the local self-intersection count (tie-break by minimal movement).
 	    if (num_cycles == 2) {
-	        const bool trace = trace_selfi_enabled(v->info().index);
+	        const bool trace = vdc_debug::trace_selfi_enabled(v->info().index);
 	        const Point center = v->point();
 
         struct CandidateA2 {
@@ -2949,7 +2082,7 @@ static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
 	    // If pairwise reflections don't fully resolve, also try per-cycle reflection candidates
 	    // (still diametric through the Delaunay site) and keep a candidate that resolves or strictly
 	    // reduces the number of local self-intersection pairs.
-	        const bool trace = trace_selfi_enabled(v->info().index);
+	        const bool trace = vdc_debug::trace_selfi_enabled(v->info().index);
 	        const Point center = v->point();
 
         struct CandidateAN {
@@ -3175,7 +2308,7 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     if (num_cycles < 2) {
         return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
     }
-    const bool trace = trace_selfi_enabled(v->info().index);
+    const bool trace = vdc_debug::trace_selfi_enabled(v->info().index);
 
     // Cheap sufficient-condition filter: if all cycles are separated by bisecting planes and
     // each cycle fan is too small to self-intersect internally, skip expensive triangle tests.
@@ -3210,8 +2343,8 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
                         << ") tri(" << w->tri0 << "," << w->tri1 << ")");
         }
     }
-    maybe_dump_selfi_cycle_metadata(dt, v, cell_by_index);
-    maybe_dump_selfi_stage(dt, v, baseline_positions, cell_by_index, "baseline");
+    vdc_debug::maybe_dump_selfi_cycle_metadata(dt, v, cell_by_index);
+    vdc_debug::maybe_dump_selfi_stage(dt, v, baseline_positions, cell_by_index, "baseline");
 
     std::vector<Point> geometric_attempt_positions;
 	    const ResolutionResult separation_result =
@@ -3235,7 +2368,7 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
                             << ") tri(" << w->tri0 << "," << w->tri1 << ")");
             }
         }
-        maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index, "A");
+        vdc_debug::maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index, "A");
         return separation_result;
     }
     if (trace) {
@@ -3246,9 +2379,9 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
                         << ") tri(" << w->tri0 << "," << w->tri1 << ")");
         }
     }
-    maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index, "A");
+    vdc_debug::maybe_dump_selfi_stage(dt, v, cycle_isovertices, cell_by_index, "A");
 
-    if (trace || log_unresolved_A_vertices()) {
+    if (trace || vdc_debug::log_unresolved_A_vertices()) {
         DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
                     << " unresolved by A-separation (cycles=" << num_cycles << ").");
     }
@@ -3266,13 +2399,13 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
 
             // Also dump the deterministic A-only candidate set (both reflections for 2-cycle,
             // per-cycle reflections for 3+ cycles, plus the pairwise-pass attempt).
-            dump_multi_isov_trace_case(
+            vdc_debug::dump_multi_isov_trace_case(
                 out_dir, v, baseline_positions, dt, cell_by_index);
 
             // Match the historical "simple_multi_failures" trace format: baseline + attempt.
-            // (baseline is already emitted by dump_multi_isov_trace_case.)
+            // (baseline is already emitted by vdc_debug::dump_multi_isov_trace_case.)
             if (!geometric_attempt_positions.empty()) {
-                dump_simple_multi_failure_stage(
+                vdc_debug::dump_simple_multi_failure_stage(
                     out_dir, v, geometric_attempt_positions, dt, cell_by_index, "geometric_attempt");
             }
         }
@@ -3555,8 +2688,8 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
                     }
 
                     // These are coupled vertices - attempt joint resolution
-                    const bool trace = trace_selfi_enabled(v1->info().index) ||
-                                       trace_selfi_enabled(v2->info().index);
+                    const bool trace = vdc_debug::trace_selfi_enabled(v1->info().index) ||
+                                       vdc_debug::trace_selfi_enabled(v2->info().index);
 
                     const std::vector<Point> baseline1 = v1->info().cycle_isovertices;
                     const std::vector<Point> baseline2 = v2->info().cycle_isovertices;
@@ -3641,75 +2774,12 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
             }
         }
     }
-    if (options.multi_isov_trace &&
-        !options.multi_isov_trace_dir.empty()) {
-        const std::filesystem::path trace_root(options.multi_isov_trace_dir);
-        const std::filesystem::path local_dir = trace_root / "local";
-        const std::filesystem::path final_dir = trace_root / "final";
-
-        // Ensure the expected subdirectories exist (best-effort).
-        {
-            std::error_code ec;
-            std::filesystem::create_directories(local_dir, ec);
-            ec.clear();
-            std::filesystem::create_directories(final_dir, ec);
-        }
-
-        // Summarize locally-unresolved (dumped) cases.
-        {
-            std::vector<int> local_unresolved;
-            local_unresolved.reserve(local_unresolved_dumped_vertices.size());
-            for (int idx : local_unresolved_dumped_vertices) {
-                local_unresolved.push_back(idx);
-            }
-            std::sort(local_unresolved.begin(), local_unresolved.end());
-
-            std::ofstream out(local_dir / "local_unresolved_vertices.txt");
-            if (out) {
-                out << "count " << local_unresolved.size() << "\n";
-                out << "vertex_indices";
-                for (int idx : local_unresolved) {
-                    out << " " << idx;
-                }
-                out << "\n";
-            }
-            std::cerr << "[DEL-SELFI-TRACE] Local unresolved vertices dumped: "
-                      << local_unresolved.size() << "\n";
-        }
-
-        std::vector<int> final_unresolved;
-        final_unresolved.reserve(32);
-
-        for (Vertex_handle vh : multi_cycle_vertices) {
-            if (!vh->info().active) continue;
-            if (vh->info().is_dummy) continue;
-            if (vh->info().facet_cycles.size() < 2) continue;
-
-            const auto& isovertices = vh->info().cycle_isovertices;
-            if (!check_self_intersection(vh, isovertices, dt, cell_by_index)) {
-                continue;
-            }
-
-            final_unresolved.push_back(vh->info().index);
-            dump_multi_isov_trace_case(
-                final_dir, vh, isovertices, dt, cell_by_index);
-        }
-
-        // Emit a small summary file and a one-line status message (trace mode only).
-        {
-            std::ofstream out(final_dir / "final_unresolved_vertices.txt");
-            if (out) {
-                out << "count " << final_unresolved.size() << "\n";
-                out << "vertex_indices";
-                for (int idx : final_unresolved) {
-                    out << " " << idx;
-                }
-                out << "\n";
-            }
-        }
-        std::cerr << "[DEL-SELFI-TRACE] Final unresolved vertices: "
-                  << final_unresolved.size() << "\n";
-    }
+    vdc_debug::finalize_multi_isov_trace(
+        options,
+        local_unresolved_dumped_vertices,
+        multi_cycle_vertices,
+        dt,
+        cell_by_index);
     
     return modified_multi_cycle_vertices;
 }
@@ -3919,7 +2989,7 @@ static ResolutionResult try_resolve_cycle_fan_foldover_at_vertex_cycle(
         return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
     }
 
-    const bool trace = trace_selfi_enabled(v->info().index);
+    const bool trace = vdc_debug::trace_selfi_enabled(v->info().index);
     const Point center = v->point();
     const std::vector<Point> baseline_positions = cycle_isovertices;
     const int baseline_intersections = count_self_intersection_pairs(
