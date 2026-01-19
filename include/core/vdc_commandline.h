@@ -36,6 +36,13 @@ struct VdcParam {
     bool refine_max_angle_enabled = false; //!< Guard: enable max-angle-driven refinement
     bool mod_cyc = true;                   //!< Guard: run modify-cycles pass to fix non-manifolds (default: enabled)
 
+    // Debug/figure dumps (JSON)
+    std::string dump_site_selection_json;  //!< If non-empty, dump active-cube site-selection data to JSON.
+    std::string dump_facet_example_json;   //!< If non-empty, dump a single isosurface-facet example to JSON.
+    std::string dump_multicycle_json;      //!< If non-empty, dump a multi-cycle vertex example to JSON.
+    int dump_multicycle_vertex = -1;       //!< If >=0, pick this vertex index for dump_multicycle_json.
+    std::string dump_isovertex_map;        //!< If non-empty, dump per-isovertex (index->(delv,cycle,position)) map.
+
     int supersample_r;             //!< Factor by which the input data is supersampled.
     int sep_dist;                  //!< Separation clearance measured in subcubes.
     int sep_split;                 //!< Number of splits (K) for refined subgrid (factor = K+1).
@@ -63,6 +70,11 @@ struct VdcParam {
           refine_min_angle_enabled(false),
           refine_max_angle_enabled(false),
           mod_cyc(true),
+          dump_site_selection_json(""),
+          dump_facet_example_json(""),
+          dump_multicycle_json(""),
+          dump_multicycle_vertex(-1),
+          dump_isovertex_map(""),
           supersample_r(1),
           sep_dist(1),
           sep_split(0),

@@ -23,6 +23,11 @@ void print_help()
     std::cout << "  -foldover                   : Enable Stage 3: within-cycle fan foldover resolution.\n";
     std::cout << "  -out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"] : Output Delaunay triangulation to delv_<mesh>.off.\n";
     std::cout << "                               Optional: specify bounding box to crop the output.\n";
+    std::cout << "  -dump_site_selection {json}  : Dump active cube sites (pre/post separation) to a JSON file.\n";
+    std::cout << "  -dump_facet_example {json}   : Dump one isosurface facet + Voronoi edge crossing example to a JSON file.\n";
+    std::cout << "  -dump_multicycle {json}      : Dump one multi-cycle vertex example (cycles, Voronoi edges, centroids) to a JSON file.\n";
+    std::cout << "  -dump_multicycle_vertex {i}  : Choose a specific Delaunay vertex index for -dump_multicycle.\n";
+    std::cout << "  -dump_isovertex_map {txt}    : Dump isovertex->(delv,cycle,position) map as a text file.\n";
     std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
     std::cout << "                               Default trigger: min_angle=20 deg, max_angle=off.\n";
     std::cout << "  -min_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold.\n";
@@ -124,6 +129,26 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
                     i += 2; // Consume the two arguments
                 }
             }
+        }
+        else if (arg == "-dump_site_selection" && i + 1 < argc)
+        {
+            vp.dump_site_selection_json = argv[++i];
+        }
+        else if (arg == "-dump_facet_example" && i + 1 < argc)
+        {
+            vp.dump_facet_example_json = argv[++i];
+        }
+        else if (arg == "-dump_multicycle" && i + 1 < argc)
+        {
+            vp.dump_multicycle_json = argv[++i];
+        }
+        else if (arg == "-dump_multicycle_vertex" && i + 1 < argc)
+        {
+            vp.dump_multicycle_vertex = std::atoi(argv[++i]);
+        }
+        else if (arg == "-dump_isovertex_map" && i + 1 < argc)
+        {
+            vp.dump_isovertex_map = argv[++i];
         }
         else if (arg == "-refine_small_angles")
         {
