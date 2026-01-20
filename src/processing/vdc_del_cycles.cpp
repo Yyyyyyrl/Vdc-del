@@ -25,6 +25,8 @@
 #include <CGAL/Triangle_3.h>
 #include <CGAL/intersections.h>
 #include <CGAL/squared_distance_3.h>
+#include <CGAL/Min_sphere_of_spheres_d.h>
+#include <CGAL/Min_sphere_of_points_d_traits_3.h>
 
 // ============================================================================
 // Helper: Build cell index lookup
@@ -1589,6 +1591,131 @@ static CycleBoundaryInfo gather_cycle_boundary_info(
     }
 
     return out;
+}
+
+// ============================================================================
+//  Cycle Separating Direction via Min-Sphere of Normals
+// ============================================================================
+
+//! @brief Type definitions for CGAL Min_sphere on 3D points
+typedef CGAL::Min_sphere_of_points_d_traits_3<K, double> MinSphereTraits;
+typedef CGAL::Min_sphere_of_spheres_d<MinSphereTraits> MinSphere;
+
+//! @brief Compute a direction that separates new cycle facets from old cycle facets.
+//!
+//! For each facet in the cycle, computes the unit outward normal (pointing toward the
+//! positive cell, i.e., where circumcenter_scalar >= isovalue). Then uses CGAL's
+//! Min_sphere_of_spheres_d to find the smallest enclosing sphere of these normals
+//! (treated as points). The center of this sphere gives the separation direction.
+//!
+//! @param v0 The vertex around which the cycle is centered.
+//! @param cycle_facets The facets in the cycle as (cell_index, facet_index) pairs.
+//! @param cell_by_index Lookup table for Cell_handle by index.
+//! @param dt The Delaunay triangulation.
+//! @param[out] separation_direction The computed separation direction (unit vector).
+//! @return true if a valid separation direction was found, false otherwise.
+bool compute_cycle_separating_direction(
+    Vertex_handle v0,
+    const std::vector<std::pair<int, int>>& cycle_facets,
+    const std::vector<Cell_handle>& cell_by_index,
+    const Delaunay& dt,
+    float separation_direction[3]
+) {
+    if (cycle_facets.empty()) {
+        return false;
+    }
+
+    // Collect outward unit normals for each facet in the cycle.
+    // Each facet is stored with its positive cell (where scalar >= isovalue).
+    // The outward normal points from the facet toward the positive cell's circumcenter.
+    std::vector<Point> normals_as_points;
+    normals_as_points.reserve(cycle_facets.size());
+
+    for (const auto& [cell_idx, facet_idx] : cycle_facets) {
+        Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
+        if (cell == Cell_handle()) {
+            continue;
+        }
+        if (dt.is_infinite(cell)) {
+            continue;
+        }
+        if (facet_idx < 0 || facet_idx >= 4) {
+            continue;
+        }
+
+        // Get the three vertices of the facet (opposite to facet_idx vertex)
+        std::array<Point, 3> facet_verts;
+        bool ok = true;
+        for (int k = 0; k < 3; ++k) {
+            const int cell_vertex_idx = (facet_idx + 1 + k) % 4;
+            Vertex_handle vh = cell->vertex(cell_vertex_idx);
+            if (vh == Vertex_handle() || dt.is_infinite(vh)) {
+                ok = false;
+                break;
+            }
+            facet_verts[static_cast<size_t>(k)] = vh->point();
+        }
+        if (!ok) {
+            continue;
+        }
+
+        // Compute the facet normal using cross product
+        const Vector3 edge1(facet_verts[0], facet_verts[1]);
+        const Vector3 edge2(facet_verts[0], facet_verts[2]);
+        Vector3 normal = vec_cross(edge1, edge2);
+
+        const double normal_len = vec_norm(normal);
+        if (normal_len < 1e-12) {
+            continue;  // Degenerate facet
+        }
+        normal = normal / normal_len;  // Normalize
+
+        // Determine if normal points toward the positive cell or away.
+        // The positive cell is `cell` (by FacetKey convention).
+        // The facet lies between `cell` (positive) and its neighbor (negative).
+        // We want the normal pointing toward `cell`, i.e., toward circumcenter of `cell`.
+        const Point& circumcenter = cell->info().circumcenter;
+        const Vector3 to_circumcenter(facet_verts[0], circumcenter);
+        if (vec_dot(normal, to_circumcenter) < 0) {
+            normal = -normal;  // Flip to point toward positive cell
+        }
+
+        // Store the unit normal as a point (vector from origin)
+        normals_as_points.emplace_back(normal.x(), normal.y(), normal.z());
+    }
+
+    if (normals_as_points.empty()) {
+        return false;
+    }
+
+    // Use CGAL Min_sphere to compute the smallest enclosing sphere of the normals.
+    // The center of this sphere gives the "average" direction.
+    MinSphere min_sphere(normals_as_points.begin(), normals_as_points.end());
+
+    if (min_sphere.is_empty()) {
+        return false;
+    }
+
+    // Extract center coordinates
+    auto center_it = min_sphere.center_cartesian_begin();
+    const double cx = *center_it++;
+    const double cy = *center_it++;
+    const double cz = *center_it;
+
+    const double center_len = std::sqrt(cx * cx + cy * cy + cz * cz);
+
+    // If center is very close to origin, normals span all directions - no separation
+    constexpr double eps = 1e-6;
+    if (center_len < eps) {
+        return false;
+    }
+
+    // Normalize and output
+    separation_direction[0] = static_cast<float>(cx / center_len);
+    separation_direction[1] = static_cast<float>(cy / center_len);
+    separation_direction[2] = static_cast<float>(cz / center_len);
+
+    return true;
 }
 
 static bool is_cycle_in_positive_half_space(

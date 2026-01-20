@@ -248,4 +248,26 @@ int find_cycle_containing_facet(
     int facet_index
 );
 
+/**
+ * @brief Compute a direction that separates cycle facets.
+ *
+ * For each facet in the cycle, computes the unit outward normal pointing toward
+ * the positive cell. Uses CGAL's Min_sphere to find the smallest enclosing sphere
+ * of these normals. The center gives the separation direction.
+ *
+ * @param v0 The vertex around which the cycle is centered.
+ * @param cycle_facets The facets in the cycle as (cell_index, facet_index) pairs.
+ * @param cell_by_index Lookup table for Cell_handle by index.
+ * @param dt The Delaunay triangulation.
+ * @param[out] separation_direction The computed separation direction (unit vector).
+ * @return true if a valid separation direction was found, false otherwise.
+ */
+bool compute_cycle_separating_direction(
+    Vertex_handle v0,
+    const std::vector<std::pair<int, int>>& cycle_facets,
+    const std::vector<Cell_handle>& cell_by_index,
+    const Delaunay& dt,
+    float separation_direction[3]
+);
+
 #endif // VDC_DEL_CYCLES_H
