@@ -35,7 +35,7 @@ struct VdcParam {
     bool refine_min_angle_enabled = false; //!< Guard: enable min-angle-driven refinement
     bool refine_max_angle_enabled = false; //!< Guard: enable max-angle-driven refinement
     bool mod_cyc = true;                   //!< Guard: run modify-cycles pass to fix non-manifolds (default: enabled)
-    bool flip_small_dihedral_cells = false; //!< Flip cell signs when 3/4 isosurface facets form small dihedrals
+    bool flip_small_dihedral_cells = true; //!< Flip cell signs when 3/4 isosurface facets form small dihedrals
     double cos_dihedral_angle_threshold = 0.9961946980917455; //!< Default: cos(5 degrees)
 
     // Debug/figure dumps (JSON)
