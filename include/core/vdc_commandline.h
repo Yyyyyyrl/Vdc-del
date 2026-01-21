@@ -72,7 +72,7 @@ struct VdcParam {
           refine_min_angle_enabled(false),
           refine_max_angle_enabled(false),
           mod_cyc(true),
-          flip_small_dihedral_cells(false),
+          flip_small_dihedral_cells(true),
           cos_dihedral_angle_threshold(0.9961946980917455),
           dump_site_selection_json(""),
           dump_facet_example_json(""),

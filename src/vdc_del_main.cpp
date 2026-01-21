@@ -264,7 +264,7 @@ int main(int argc, char* argv[]) {
 
     TimingStats::getInstance().stopTimer("CellProcessing", "Total");
 
-    // Optional: Flip cell signs to remove very small dihedral angles between isosurface facets.
+    //Flip cell signs to remove very small dihedral angles between isosurface facets.
     if (param.flip_small_dihedral_cells) {
         TimingStats::getInstance().startTimer("CellProcessing", "SmallDihedralFlip");
         if (!param.terse) {
