@@ -3529,8 +3529,10 @@ void compute_cycle_isovertices(
     // ========================================================================
     // Stage 3: Resolve within-cycle foldovers (targeted, deterministic).
     // ========================================================================
-    resolve_suspect_cycle_fan_foldovers(
-        dt, cell_by_index, multi_cycle_vertices, modified_multi_cycle_vertices, stats, options);
+    if (options.foldover) {
+        resolve_suspect_cycle_fan_foldovers(
+            dt, cell_by_index, multi_cycle_vertices, modified_multi_cycle_vertices, stats, options);
+    }
 
     // ========================================================================
     // Report final statistics.
