@@ -25,6 +25,7 @@ struct VdcParam {
     bool position_multi_isov_on_delv = false; //!< Debug: place all multi-cycle isovertices at the Delaunay vertex
     bool multi_isov_trace = false; //!< Dumps multi-cycle isovertex trace (local/ + final/) as OFF/TXT files
     bool foldover = false;         //!< Enable Stage 3: within-cycle fan foldover resolution
+    bool use_sep_dir = false;      //!< Use separation-direction-based resolution instead of reflection candidates
     bool out_delv = false;         //!< Output Delaunay triangulation to delv_xxx.off
     bool out_delv_has_bbox = false; //!< If true, crop Delaunay output to bounding box
     double out_delv_bbox_min[3] = {0, 0, 0}; //!< Min corner of bounding box for -out_delv
@@ -65,6 +66,7 @@ struct VdcParam {
           position_multi_isov_on_delv(false),
           multi_isov_trace(false),
           foldover(false),
+          use_sep_dir(false),
           out_delv(false),
           terse(false),
           timing_stats(false),

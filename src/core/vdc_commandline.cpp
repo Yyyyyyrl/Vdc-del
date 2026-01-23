@@ -21,6 +21,7 @@ void print_help()
     std::cout << "  -position_multi_isov_on_delv: Debug only. For multi-cycle vertices, place all iso-vertices at the Delaunay vertex (disables repositioning).\n";
     std::cout << "  -multi_isov_trace           : Dump multi-cycle isovertex resolution trace as OFF/TXT under simple_multi_failures_trace/ (subdirs: local/, final/).\n";
     std::cout << "  -foldover                   : Enable Stage 3: within-cycle fan foldover resolution.\n";
+    std::cout << "  -use_sep_dir                : Use separation-direction-based resolution (min-sphere of facet normals) instead of reflection candidates.\n";
     std::cout << "  -out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"] : Output Delaunay triangulation to delv_<mesh>.off.\n";
     std::cout << "                               Optional: specify bounding box to crop the output.\n";
     std::cout << "  -dump_site_selection {json}  : Dump active cube sites (pre/post separation) to a JSON file.\n";
@@ -112,6 +113,10 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         else if (arg == "-foldover")
         {
             vp.foldover = true;
+        }
+        else if (arg == "-use_sep_dir")
+        {
+            vp.use_sep_dir = true;
         }
         else if (arg == "-out_delv")
         {

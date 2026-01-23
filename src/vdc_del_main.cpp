@@ -340,6 +340,7 @@ int main(int argc, char* argv[]) {
         param.position_multi_isov_on_delv,
         param.multi_isov_trace,
         param.foldover,
+        param.use_sep_dir,
         multi_isov_trace_dir,
     };
 

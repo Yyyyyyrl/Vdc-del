@@ -1892,7 +1892,8 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
-    std::vector<Point>* geometric_attempt_positions_out
+    std::vector<Point>* geometric_attempt_positions_out,
+    bool use_sep_dir
 ) {
     const auto& cycles = v->info().facet_cycles;
     const int num_cycles = static_cast<int>(cycles.size());
@@ -1939,41 +1940,118 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
             candidates.push_back(std::move(cand));
         };
 
-        // reflect-B: move cycle1 to the diametric position of cycle0
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[1] = reflect_through_center(center, vpos0);
-            consider_positions("reflect_B", std::move(cand));
-        }
-        // reflect-A: move cycle0 to the diametric position of cycle1
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, vpos1);
-            consider_positions("reflect_A", std::move(cand));
+        // ====================================================================
+        // Old approach: reflection-based candidates (only when !use_sep_dir)
+        // ====================================================================
+        if (!use_sep_dir) {
+            // reflect-B: move cycle1 to the diametric position of cycle0
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[1] = reflect_through_center(center, vpos0);
+                consider_positions("reflect_B", std::move(cand));
+            }
+            // reflect-A: move cycle0 to the diametric position of cycle1
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[0] = reflect_through_center(center, vpos1);
+                consider_positions("reflect_A", std::move(cand));
+            }
+
+            // Also try self reflections (still diametric through the Delaunay site).
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[0] = reflect_through_center(center, vpos0);
+                consider_positions("reflect_self0", std::move(cand));
+            }
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[1] = reflect_through_center(center, vpos1);
+                consider_positions("reflect_self1", std::move(cand));
+            }
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[0] = reflect_through_center(center, vpos0);
+                cand[1] = reflect_through_center(center, vpos1);
+                consider_positions("reflect_self_both", std::move(cand));
+            }
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[0] = reflect_through_center(center, vpos1);
+                cand[1] = reflect_through_center(center, vpos0);
+                consider_positions("reflect_cross_both", std::move(cand));
+            }
         }
 
-        // Also try self reflections (still diametric through the Delaunay site).
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, vpos0);
-            consider_positions("reflect_self0", std::move(cand));
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[1] = reflect_through_center(center, vpos1);
-            consider_positions("reflect_self1", std::move(cand));
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, vpos0);
-            cand[1] = reflect_through_center(center, vpos1);
-            consider_positions("reflect_self_both", std::move(cand));
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, vpos1);
-            cand[1] = reflect_through_center(center, vpos0);
-            consider_positions("reflect_cross_both", std::move(cand));
+        // ====================================================================
+        // New approach: Separation-direction-based candidates (only when use_sep_dir)
+        // ====================================================================
+        // Compute separation direction for each cycle and place isovertices along
+        // those directions at various radii from the Delaunay vertex.
+        if (use_sep_dir) {
+            float sep_dir0[3] = {0, 0, 0};
+            float sep_dir1[3] = {0, 0, 0};
+            const bool has_sep0 = compute_cycle_separating_direction(
+                v, cycles[0], cell_by_index, dt, sep_dir0);
+            const bool has_sep1 = compute_cycle_separating_direction(
+                v, cycles[1], cell_by_index, dt, sep_dir1);
+
+            if (has_sep0 || has_sep1) {
+                // Compute a reasonable radius: distance from center to baseline positions
+                const double r0 = std::sqrt(squared_distance(center, vpos0));
+                const double r1 = std::sqrt(squared_distance(center, vpos1));
+                const double avg_r = (r0 + r1) * 0.5;
+
+                // Helper: move from center in direction dir by distance r
+                auto move_in_dir = [&center](const float dir[3], double r) -> Point {
+                    return Point(
+                        center.x() + r * dir[0],
+                        center.y() + r * dir[1],
+                        center.z() + r * dir[2]
+                    );
+                };
+
+                // Candidate: move cycle0 along its separation direction
+                if (has_sep0) {
+                    std::vector<Point> cand = baseline_positions;
+                    cand[0] = move_in_dir(sep_dir0, avg_r);
+                    consider_positions("sep_dir0", std::move(cand));
+
+                    // Also try opposite direction
+                    float neg_sep_dir0[3] = {-sep_dir0[0], -sep_dir0[1], -sep_dir0[2]};
+                    std::vector<Point> cand_neg = baseline_positions;
+                    cand_neg[0] = move_in_dir(neg_sep_dir0, avg_r);
+                    consider_positions("sep_dir0_neg", std::move(cand_neg));
+                }
+
+                // Candidate: move cycle1 along its separation direction
+                if (has_sep1) {
+                    std::vector<Point> cand = baseline_positions;
+                    cand[1] = move_in_dir(sep_dir1, avg_r);
+                    consider_positions("sep_dir1", std::move(cand));
+
+                    // Also try opposite direction
+                    float neg_sep_dir1[3] = {-sep_dir1[0], -sep_dir1[1], -sep_dir1[2]};
+                    std::vector<Point> cand_neg = baseline_positions;
+                    cand_neg[1] = move_in_dir(neg_sep_dir1, avg_r);
+                    consider_positions("sep_dir1_neg", std::move(cand_neg));
+                }
+
+                // Candidate: move both cycles along their separation directions
+                if (has_sep0 && has_sep1) {
+                    std::vector<Point> cand = baseline_positions;
+                    cand[0] = move_in_dir(sep_dir0, avg_r);
+                    cand[1] = move_in_dir(sep_dir1, avg_r);
+                    consider_positions("sep_dir_both", std::move(cand));
+
+                    // Try opposite directions
+                    float neg_sep_dir0[3] = {-sep_dir0[0], -sep_dir0[1], -sep_dir0[2]};
+                    float neg_sep_dir1[3] = {-sep_dir1[0], -sep_dir1[1], -sep_dir1[2]};
+                    std::vector<Point> cand_neg = baseline_positions;
+                    cand_neg[0] = move_in_dir(neg_sep_dir0, avg_r);
+                    cand_neg[1] = move_in_dir(neg_sep_dir1, avg_r);
+                    consider_positions("sep_dir_both_neg", std::move(cand_neg));
+                }
+            }
         }
 
         const int baseline_intersections = count_self_intersection_pairs(
@@ -2388,7 +2466,8 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
 	            cycle_isovertices,
 	            dt,
 	            cell_by_index,
-	            &geometric_attempt_positions);
+	            &geometric_attempt_positions,
+	            options.use_sep_dir);
     if (separation_result.status == ResolutionStatus::RESOLVED) {
         DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
                     << " resolved by geometric separation (cycles=" << num_cycles << ").");

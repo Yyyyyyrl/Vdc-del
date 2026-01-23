@@ -1145,7 +1145,8 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
-    std::vector<Point>* geometric_attempt_positions_out);
+    std::vector<Point>* geometric_attempt_positions_out,
+    bool use_sep_dir);
 
 // Declared in src/processing/vdc_del_cycles.cpp (algorithm code).
 bool check_self_intersection(
@@ -2244,7 +2245,7 @@ void dump_multi_isov_trace_case(
         std::vector<Point> attempt = baseline_positions;
         std::vector<Point> attempt_out;
         (void)try_resolve_multicycle_by_cycle_separation_tests(
-            v, attempt, dt, cell_by_index, &attempt_out);
+            v, attempt, dt, cell_by_index, &attempt_out, false);
         if (!attempt_out.empty()) {
             dump_simple_multi_failure_stage(out_dir, v, attempt_out, dt, cell_by_index, "pairwise_attempt");
         }
