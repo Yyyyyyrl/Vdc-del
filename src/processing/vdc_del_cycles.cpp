@@ -1625,11 +1625,15 @@ bool compute_cycle_separating_direction(
         return false;
     }
 
-    // Collect outward unit normals for each facet in the cycle.
+    const bool trace = vdc_debug::trace_selfi_enabled(v0->info().index);
+
+    // Collect unit facet normals for each facet in the cycle.
     // Each facet is stored with its positive cell (where scalar >= isovalue).
-    // The outward normal points from the facet toward the positive cell's circumcenter.
+    // Orient each normal to point toward the positive cell side of the facet plane.
     std::vector<Point> normals_as_points;
     normals_as_points.reserve(cycle_facets.size());
+
+    int circumcenter_across_count = 0;
 
     for (const auto& [cell_idx, facet_idx] : cycle_facets) {
         Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
@@ -1670,14 +1674,28 @@ bool compute_cycle_separating_direction(
         }
         normal = normal / normal_len;  // Normalize
 
-        // Determine if normal points toward the positive cell or away.
-        // The positive cell is `cell` (by FacetKey convention).
-        // The facet lies between `cell` (positive) and its neighbor (negative).
-        // We want the normal pointing toward `cell`, i.e., toward circumcenter of `cell`.
-        const Point& circumcenter = cell->info().circumcenter;
-        const Vector3 to_circumcenter(facet_verts[0], circumcenter);
-        if (vec_dot(normal, to_circumcenter) < 0) {
-            normal = -normal;  // Flip to point toward positive cell
+        // Orient the normal so it points toward `cell` (by FacetKey convention this
+        // is the positive cell). Use a point guaranteed to be on the cell side of
+        // the facet plane: the vertex opposite this facet within the cell.
+        // (Using the cell circumcenter is incorrect for obtuse/sliver cells where
+        // the circumcenter may lie outside and across the facet plane.)
+        Vertex_handle opposite_vh = cell->vertex(facet_idx);
+        if (opposite_vh == Vertex_handle() || dt.is_infinite(opposite_vh)) {
+            continue;
+        }
+        const Vector3 to_opposite(facet_verts[0], opposite_vh->point());
+        if (vec_dot(normal, to_opposite) < 0) {
+            normal = -normal;
+        }
+
+        if (trace) {
+            // Diagnostics: count how often the circumcenter lies across the facet plane
+            // from the (guaranteed) cell side. This was a root cause of misoriented
+            // normals in the earlier circumcenter-based implementation.
+            const Vector3 to_circumcenter(facet_verts[0], cell->info().circumcenter);
+            if (vec_dot(normal, to_circumcenter) < -1e-12) {
+                ++circumcenter_across_count;
+            }
         }
 
         // Store the unit normal as a point (vector from origin)
@@ -1707,6 +1725,15 @@ bool compute_cycle_separating_direction(
     // If center is very close to origin, normals span all directions - no separation
     constexpr double eps = 1e-6;
     if (center_len < eps) {
+        if (trace) {
+            DEBUG_PRINT("[DEL-SEP-DIR] v=" << v0->info().index
+                        << " facets=" << cycle_facets.size()
+                        << " used=" << normals_as_points.size()
+                        << " circumcenter_across=" << circumcenter_across_count
+                        << "/" << normals_as_points.size()
+                        << " center_len=" << center_len
+                        << " -> NO_DIRECTION");
+        }
         return false;
     }
 
@@ -1714,6 +1741,19 @@ bool compute_cycle_separating_direction(
     separation_direction[0] = static_cast<float>(cx / center_len);
     separation_direction[1] = static_cast<float>(cy / center_len);
     separation_direction[2] = static_cast<float>(cz / center_len);
+
+    if (trace) {
+        DEBUG_PRINT("[DEL-SEP-DIR] v=" << v0->info().index
+                    << " facets=" << cycle_facets.size()
+                    << " used=" << normals_as_points.size()
+                    << " circumcenter_across=" << circumcenter_across_count
+                    << "/" << normals_as_points.size()
+                    << " center_len=" << center_len
+                    << " dir=("
+                    << separation_direction[0] << ","
+                    << separation_direction[1] << ","
+                    << separation_direction[2] << ")");
+    }
 
     return true;
 }
@@ -1924,7 +1964,8 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         };
 
 	        std::vector<CandidateA2> candidates;
-	        candidates.reserve(6);
+	        // Worst case: 6 sep-dir candidates + 6 reflection candidates.
+	        candidates.reserve(12);
 
         const Point vpos0 = baseline_positions[0];
         const Point vpos1 = baseline_positions[1];
@@ -1940,10 +1981,7 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
             candidates.push_back(std::move(cand));
         };
 
-        // ====================================================================
-        // Old approach: reflection-based candidates (only when !use_sep_dir)
-        // ====================================================================
-        if (!use_sep_dir) {
+        auto add_reflection_candidates = [&]() {
             // reflect-B: move cycle1 to the diametric position of cycle0
             {
                 std::vector<Point> cand = baseline_positions;
@@ -1980,14 +2018,9 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                 cand[1] = reflect_through_center(center, vpos0);
                 consider_positions("reflect_cross_both", std::move(cand));
             }
-        }
+        };
 
-        // ====================================================================
-        // New approach: Separation-direction-based candidates (only when use_sep_dir)
-        // ====================================================================
-        // Compute separation direction for each cycle and place isovertices along
-        // those directions at various radii from the Delaunay vertex.
-        if (use_sep_dir) {
+        auto add_sep_dir_candidates = [&]() {
             float sep_dir0[3] = {0, 0, 0};
             float sep_dir1[3] = {0, 0, 0};
             const bool has_sep0 = compute_cycle_separating_direction(
@@ -2052,6 +2085,15 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                     consider_positions("sep_dir_both_neg", std::move(cand_neg));
                 }
             }
+        };
+
+        // ====================================================================
+        // Candidate generation
+        // ====================================================================
+        if (use_sep_dir) {
+            add_sep_dir_candidates();
+        } else {
+            add_reflection_candidates();
         }
 
         const int baseline_intersections = count_self_intersection_pairs(
@@ -2108,6 +2150,16 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
 
         for (auto& cand : candidates) {
             evaluate_candidate(cand);
+        }
+
+        // If sep-dir candidates fail to resolve, fall back to reflection candidates.
+        // (Some cycles legitimately have no separating direction: min-sphere center ~ 0.)
+        if (use_sep_dir && !best_resolved) {
+            const size_t start = candidates.size();
+            add_reflection_candidates();
+            for (size_t i = start; i < candidates.size(); ++i) {
+                evaluate_candidate(candidates[i]);
+            }
         }
 
         if (best_resolved) {
