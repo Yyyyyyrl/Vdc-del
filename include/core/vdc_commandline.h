@@ -21,7 +21,7 @@ struct VdcParam {
     bool sep;                      //!< Flag to enable separation of active cubes.
     bool multi_isov;               //!< Flag to enable multi-isosurface mode.
     bool supersample;              //!< Flag to enable supersampling of the input data.
-    bool position_delv_on_isov = false; //!< Flag to position Delaunay vertices on isosurface vertices
+    bool position_delv_on_isov = true; //!< Flag to position Delaunay vertices on isosurface vertices
     bool position_multi_isov_on_delv = false; //!< Debug: place all multi-cycle isovertices at the Delaunay vertex
     bool multi_isov_trace = false; //!< Dumps multi-cycle isovertex trace (local/ + final/) as OFF/TXT files
     bool foldover = false;         //!< Enable Stage 3: within-cycle fan foldover resolution
@@ -62,7 +62,7 @@ struct VdcParam {
           sep(false),
           multi_isov(true),
           supersample(false),
-          position_delv_on_isov(false),
+          position_delv_on_isov(true),
           position_multi_isov_on_delv(false),
           multi_isov_trace(false),
           foldover(false),

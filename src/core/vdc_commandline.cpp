@@ -17,7 +17,7 @@ void print_help()
     std::cout << "  -supersample {factor}       : Supersample the input data by the given factor.\n";
     std::cout << "  -multi_isov                 : Use multi iso-vertices mode (default).\n";
     std::cout << "  -single_isov                : Use single iso-vertices mode.\n";
-    std::cout << "  -position_delv_on_isov      : Position Delaunay vertices on isosurface vertices instead of cube iso-crossings.\n";
+    std::cout << "  -position_delv_on_grid_center: Position Delaunay vertices on cube centers.\n";
     std::cout << "  -position_multi_isov_on_delv: Debug only. For multi-cycle vertices, place all iso-vertices at the Delaunay vertex (disables repositioning).\n";
     std::cout << "  -multi_isov_trace           : Dump multi-cycle isovertex resolution trace as OFF/TXT under simple_multi_failures_trace/ (subdirs: local/, final/).\n";
     std::cout << "  -foldover                   : Enable Stage 3: within-cycle fan foldover resolution.\n";
@@ -98,9 +98,9 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         {
             vp.multi_isov = false; // Enable single-isovertex mode.
         }
-        else if (arg == "-position_delv_on_isov")
+        else if (arg == "-position_delv_on_grid_center")
         {
-            vp.position_delv_on_isov = true; // Place Delaunay vertices at isosurface vertex locations.
+            vp.position_delv_on_isov = false; // Place Delaunay vertices at cube center locations.
         }
         else if (arg == "-position_multi_isov_on_delv")
         {
