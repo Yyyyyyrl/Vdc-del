@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cmath>
+#include <iomanip>
 #include <stdexcept>
 #include <CGAL/Triangle_3.h>
 #include <CGAL/intersections.h>
@@ -1619,6 +1620,7 @@ bool compute_cycle_separating_direction(
     const std::vector<std::pair<int, int>>& cycle_facets,
     const std::vector<Cell_handle>& cell_by_index,
     const Delaunay& dt,
+    int cycle_index,
     float separation_direction[3]
 ) {
     if (cycle_facets.empty()) {
@@ -1626,12 +1628,33 @@ bool compute_cycle_separating_direction(
     }
 
     const bool trace = vdc_debug::trace_selfi_enabled(v0->info().index);
+    const std::string trace_dir = trace ? vdc_debug::trace_selfi_dump_dir() : std::string();
+    const bool dump_normals = trace && !trace_dir.empty();
 
     // Collect unit facet normals for each facet in the cycle.
     // Each facet is stored with its positive cell (where scalar >= isovalue).
     // Orient each normal to point toward the positive cell side of the facet plane.
     std::vector<Point> normals_as_points;
     normals_as_points.reserve(cycle_facets.size());
+
+    struct FacetNormalDumpEntry {
+        int cell_index = -1;
+        int facet_index = -1;
+        int facet_vidx[3] = {-1, -1, -1};
+        Point facet_p[3];
+        int opposite_vidx = -1;
+        Point opposite_p;
+        double nx = 0.0;
+        double ny = 0.0;
+        double nz = 0.0;
+        double dot_to_opposite = 0.0;
+        double dot_to_circumcenter = 0.0;
+    };
+
+    std::vector<FacetNormalDumpEntry> dump_entries;
+    if (dump_normals) {
+        dump_entries.reserve(cycle_facets.size());
+    }
 
     int circumcenter_across_count = 0;
 
@@ -1647,7 +1670,8 @@ bool compute_cycle_separating_direction(
             continue;
         }
 
-        // Get the three vertices of the facet (opposite to facet_idx vertex)
+        // Get the three vertices of the facet (opposite to facet_idx vertex).
+        std::array<Vertex_handle, 3> facet_vhs;
         std::array<Point, 3> facet_verts;
         bool ok = true;
         for (int k = 0; k < 3; ++k) {
@@ -1657,6 +1681,7 @@ bool compute_cycle_separating_direction(
                 ok = false;
                 break;
             }
+            facet_vhs[static_cast<size_t>(k)] = vh;
             facet_verts[static_cast<size_t>(k)] = vh->point();
         }
         if (!ok) {
@@ -1684,22 +1709,44 @@ bool compute_cycle_separating_direction(
             continue;
         }
         const Vector3 to_opposite(facet_verts[0], opposite_vh->point());
-        if (vec_dot(normal, to_opposite) < 0) {
+        double dot_to_opposite = vec_dot(normal, to_opposite);
+        if (dot_to_opposite < 0) {
             normal = -normal;
+            dot_to_opposite = -dot_to_opposite;
         }
+
+        const Vector3 to_circumcenter(facet_verts[0], cell->info().circumcenter);
+        const double dot_to_circumcenter = vec_dot(normal, to_circumcenter);
 
         if (trace) {
             // Diagnostics: count how often the circumcenter lies across the facet plane
             // from the (guaranteed) cell side. This was a root cause of misoriented
             // normals in the earlier circumcenter-based implementation.
-            const Vector3 to_circumcenter(facet_verts[0], cell->info().circumcenter);
-            if (vec_dot(normal, to_circumcenter) < -1e-12) {
+            if (dot_to_circumcenter < -1e-12) {
                 ++circumcenter_across_count;
             }
         }
 
         // Store the unit normal as a point (vector from origin)
         normals_as_points.emplace_back(normal.x(), normal.y(), normal.z());
+
+        if (dump_normals) {
+            FacetNormalDumpEntry e;
+            e.cell_index = cell_idx;
+            e.facet_index = facet_idx;
+            for (int k = 0; k < 3; ++k) {
+                e.facet_p[k] = facet_verts[static_cast<size_t>(k)];
+                e.facet_vidx[k] = facet_vhs[static_cast<size_t>(k)]->info().index;
+            }
+            e.opposite_vidx = opposite_vh->info().index;
+            e.opposite_p = opposite_vh->point();
+            e.nx = normal.x();
+            e.ny = normal.y();
+            e.nz = normal.z();
+            e.dot_to_opposite = dot_to_opposite;
+            e.dot_to_circumcenter = dot_to_circumcenter;
+            dump_entries.push_back(e);
+        }
     }
 
     if (normals_as_points.empty()) {
@@ -1721,6 +1768,71 @@ bool compute_cycle_separating_direction(
     const double cz = *center_it;
 
     const double center_len = std::sqrt(cx * cx + cy * cy + cz * cz);
+
+    if (dump_normals) {
+        std::error_code ec;
+        std::filesystem::path out_dir(trace_dir);
+        std::filesystem::create_directories(out_dir, ec);
+
+        const int vidx = v0->info().index;
+        const std::filesystem::path path =
+            out_dir / ("sep_dir_v" + std::to_string(vidx) + "_c" + std::to_string(cycle_index) + ".txt");
+
+        std::ofstream out(path);
+        if (out) {
+            out << std::setprecision(17);
+            const Point center = v0->point();
+            out << "vertex_index " << vidx << "\n";
+            out << "cycle_index " << cycle_index << "\n";
+            out << "center " << center.x() << " " << center.y() << " " << center.z() << "\n";
+            out << "cycle_facets_total " << cycle_facets.size() << "\n";
+            out << "normals_used " << normals_as_points.size() << "\n";
+            out << "circumcenter_across_count " << circumcenter_across_count << "\n";
+            out << "min_sphere_center " << cx << " " << cy << " " << cz << "\n";
+            out << "min_sphere_center_len " << center_len << "\n";
+            out << "eps_no_direction " << 1e-6 << "\n\n";
+
+            // Aggregate statistics about the normal distribution.
+            double sx = 0.0, sy = 0.0, sz = 0.0;
+            for (const auto& n : normals_as_points) {
+                sx += n.x();
+                sy += n.y();
+                sz += n.z();
+            }
+            const double sum_len = std::sqrt(sx * sx + sy * sy + sz * sz);
+            out << "sum_normals " << sx << " " << sy << " " << sz << "\n";
+            out << "sum_normals_len " << sum_len << "\n";
+
+            double min_pair_dot = 1.0;
+            double max_pair_dot = -1.0;
+            for (size_t i = 0; i < normals_as_points.size(); ++i) {
+                for (size_t j = i + 1; j < normals_as_points.size(); ++j) {
+                    const double d = normals_as_points[i].x() * normals_as_points[j].x()
+                                   + normals_as_points[i].y() * normals_as_points[j].y()
+                                   + normals_as_points[i].z() * normals_as_points[j].z();
+                    min_pair_dot = std::min(min_pair_dot, d);
+                    max_pair_dot = std::max(max_pair_dot, d);
+                }
+            }
+            out << "min_pair_dot " << min_pair_dot << "\n";
+            out << "max_pair_dot " << max_pair_dot << "\n\n";
+
+            out << "facet_normals:\n";
+            for (const auto& e : dump_entries) {
+                out << "facet cell=" << e.cell_index << " fi=" << e.facet_index
+                    << " vids=(" << e.facet_vidx[0] << "," << e.facet_vidx[1] << "," << e.facet_vidx[2] << ")"
+                    << " p0=(" << e.facet_p[0].x() << "," << e.facet_p[0].y() << "," << e.facet_p[0].z() << ")"
+                    << " p1=(" << e.facet_p[1].x() << "," << e.facet_p[1].y() << "," << e.facet_p[1].z() << ")"
+                    << " p2=(" << e.facet_p[2].x() << "," << e.facet_p[2].y() << "," << e.facet_p[2].z() << ")"
+                    << " opp=" << e.opposite_vidx
+                    << " opp_p=(" << e.opposite_p.x() << "," << e.opposite_p.y() << "," << e.opposite_p.z() << ")"
+                    << " n=(" << e.nx << "," << e.ny << "," << e.nz << ")"
+                    << " dot_to_opp=" << e.dot_to_opposite
+                    << " dot_to_circ=" << e.dot_to_circumcenter
+                    << "\n";
+            }
+        }
+    }
 
     // If center is very close to origin, normals span all directions - no separation
     constexpr double eps = 1e-6;
@@ -1956,16 +2068,16 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
 	        const bool trace = vdc_debug::trace_selfi_enabled(v->info().index);
 	        const Point center = v->point();
 
-        struct CandidateA2 {
-            std::vector<Point> positions;
-            const char* label = nullptr;
-            double move2 = 0.0;
-            int intersections = std::numeric_limits<int>::max();
-        };
+	        struct CandidateA2 {
+	            std::vector<Point> positions;
+	            const char* label = nullptr;
+	            double move2 = 0.0;
+	            int intersections = std::numeric_limits<int>::max();
+	        };
 
-	        std::vector<CandidateA2> candidates;
-	        // Worst case: 6 sep-dir candidates + 6 reflection candidates.
-	        candidates.reserve(12);
+		        std::vector<CandidateA2> candidates;
+		        // Worst case: 2 sep-dir candidates + 6 reflection candidates.
+		        candidates.reserve(8);
 
         const Point vpos0 = baseline_positions[0];
         const Point vpos1 = baseline_positions[1];
@@ -2020,19 +2132,19 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
             }
         };
 
-        auto add_sep_dir_candidates = [&]() {
-            float sep_dir0[3] = {0, 0, 0};
-            float sep_dir1[3] = {0, 0, 0};
-            const bool has_sep0 = compute_cycle_separating_direction(
-                v, cycles[0], cell_by_index, dt, sep_dir0);
-            const bool has_sep1 = compute_cycle_separating_direction(
-                v, cycles[1], cell_by_index, dt, sep_dir1);
+	        auto add_sep_dir_candidates = [&]() {
+	            float sep_dir0[3] = {0, 0, 0};
+	            float sep_dir1[3] = {0, 0, 0};
+	            const bool has_sep0 = compute_cycle_separating_direction(
+	                v, cycles[0], cell_by_index, dt, 0, sep_dir0);
+	            const bool has_sep1 = compute_cycle_separating_direction(
+	                v, cycles[1], cell_by_index, dt, 1, sep_dir1);
 
-            if (has_sep0 || has_sep1) {
-                // Compute a reasonable radius: distance from center to baseline positions
-                const double r0 = std::sqrt(squared_distance(center, vpos0));
-                const double r1 = std::sqrt(squared_distance(center, vpos1));
-                const double avg_r = (r0 + r1) * 0.5;
+	            if (has_sep0 || has_sep1) {
+	                // Compute a reasonable radius: distance from center to baseline positions
+	                const double r0 = std::sqrt(squared_distance(center, vpos0));
+	                const double r1 = std::sqrt(squared_distance(center, vpos1));
+	                const double avg_r = (r0 + r1) * 0.5;
 
                 // Helper: move from center in direction dir by distance r
                 auto move_in_dir = [&center](const float dir[3], double r) -> Point {
@@ -2043,49 +2155,21 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                     );
                 };
 
-                // Candidate: move cycle0 along its separation direction
-                if (has_sep0) {
-                    std::vector<Point> cand = baseline_positions;
-                    cand[0] = move_in_dir(sep_dir0, avg_r);
-                    consider_positions("sep_dir0", std::move(cand));
+	                // Candidate: move cycle0 along its separation direction
+	                if (has_sep0) {
+	                    std::vector<Point> cand = baseline_positions;
+	                    cand[0] = move_in_dir(sep_dir0, avg_r);
+	                    consider_positions("sep_dir0", std::move(cand));
+	                }
 
-                    // Also try opposite direction
-                    float neg_sep_dir0[3] = {-sep_dir0[0], -sep_dir0[1], -sep_dir0[2]};
-                    std::vector<Point> cand_neg = baseline_positions;
-                    cand_neg[0] = move_in_dir(neg_sep_dir0, avg_r);
-                    consider_positions("sep_dir0_neg", std::move(cand_neg));
-                }
-
-                // Candidate: move cycle1 along its separation direction
-                if (has_sep1) {
-                    std::vector<Point> cand = baseline_positions;
-                    cand[1] = move_in_dir(sep_dir1, avg_r);
-                    consider_positions("sep_dir1", std::move(cand));
-
-                    // Also try opposite direction
-                    float neg_sep_dir1[3] = {-sep_dir1[0], -sep_dir1[1], -sep_dir1[2]};
-                    std::vector<Point> cand_neg = baseline_positions;
-                    cand_neg[1] = move_in_dir(neg_sep_dir1, avg_r);
-                    consider_positions("sep_dir1_neg", std::move(cand_neg));
-                }
-
-                // Candidate: move both cycles along their separation directions
-                if (has_sep0 && has_sep1) {
-                    std::vector<Point> cand = baseline_positions;
-                    cand[0] = move_in_dir(sep_dir0, avg_r);
-                    cand[1] = move_in_dir(sep_dir1, avg_r);
-                    consider_positions("sep_dir_both", std::move(cand));
-
-                    // Try opposite directions
-                    float neg_sep_dir0[3] = {-sep_dir0[0], -sep_dir0[1], -sep_dir0[2]};
-                    float neg_sep_dir1[3] = {-sep_dir1[0], -sep_dir1[1], -sep_dir1[2]};
-                    std::vector<Point> cand_neg = baseline_positions;
-                    cand_neg[0] = move_in_dir(neg_sep_dir0, avg_r);
-                    cand_neg[1] = move_in_dir(neg_sep_dir1, avg_r);
-                    consider_positions("sep_dir_both_neg", std::move(cand_neg));
-                }
-            }
-        };
+	                // Candidate: move cycle1 along its separation direction
+	                if (has_sep1) {
+	                    std::vector<Point> cand = baseline_positions;
+	                    cand[1] = move_in_dir(sep_dir1, avg_r);
+	                    consider_positions("sep_dir1", std::move(cand));
+	                }
+	            }
+	        };
 
         // ====================================================================
         // Candidate generation
