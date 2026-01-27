@@ -270,8 +270,10 @@ int main(int argc, char* argv[]) {
         if (!param.terse) {
             std::cout << "Flipping small-dihedral cells...\n";
         }
+        // Convert angle threshold from degrees to cosine (done once here for efficiency)
+        const double cos_threshold = std::cos(param.dihedral_angle_threshold_deg * M_PI / 180.0);
         const int flipped = flip_cell_signs_for_small_isofacet_dihedral(
-            dt, param.cos_dihedral_angle_threshold);
+            dt, cos_threshold);
         if (!param.terse) {
             std::cout << "  Flipped " << flipped << " cells.\n";
         }

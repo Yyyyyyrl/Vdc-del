@@ -37,7 +37,7 @@ void print_help()
     std::cout << "                               Default: off.\n";
     std::cout << "  -no_dihedral_flip           : Do not flip cell sign when a cell has 3/4 isosurface facets\n";
     std::cout << "                               and any dihedral angle between those facets is below the threshold.\n";
-    std::cout << "  -cos_dihedral_angle_threshold {cos} : Cosine threshold for dihedral test (default: cos(5 deg)).\n";
+    std::cout << "  -dihedral_angle_threshold {deg}     : Dihedral angle threshold in degrees (default: 5).\n";
     std::cout << "  -terse                      : Print only the number of vertices/triangles and the output file.\n";
     std::cout << "  -timing_stats               : Print timing statistics after the run.\n";
     std::cout << "  -debug                      : Enable debug logging ([DEBUG]/[ISO]/[ISO-MATCH]/[CYC-MOD]).\n";
@@ -178,9 +178,9 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         {
             vp.flip_small_dihedral_cells = false;
         }
-        else if (arg == "-cos_dihedral_angle_threshold" && i + 1 < argc)
+        else if (arg == "-dihedral_angle_threshold" && i + 1 < argc)
         {
-            vp.cos_dihedral_angle_threshold = std::atof(argv[++i]);
+            vp.dihedral_angle_threshold_deg = std::atof(argv[++i]);
         }
         else if (arg == "-terse")
         {
