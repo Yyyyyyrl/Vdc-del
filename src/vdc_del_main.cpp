@@ -181,15 +181,15 @@ int main(int argc, char* argv[]) {
     std::vector<std::vector<GridFacets>> grid_facets = create_grid_facets(activeCubes);
 
     // Get cube centers for Delaunay vertices
-    std::vector<Point> cubeCenters = get_cube_centers(activeCubes);
+    std::vector<Point> cubeCenters = get_cube_accurate_iso_crossing_points(activeCubes);
 
-    // Use accurate iso-crossing points when explicitly requested or when
+/*     // Use accurate iso-crossing points when explicitly requested or when
     // separation uses a refined subgrid (keeps site selection consistent).
     const bool use_isov_sites = param.position_delv_on_isov || (param.sep && param.sep_split > 0);
     if (use_isov_sites) {
         cubeCenters = get_cube_accurate_iso_crossing_points(activeCubes);
     }
-
+ */
     // Construct Delaunay triangulation
     Delaunay dt;
     construct_delaunay_triangulation(dt, grid, grid_facets, param, cubeCenters);

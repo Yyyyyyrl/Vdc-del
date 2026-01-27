@@ -12,7 +12,7 @@ void print_help()
     std::cout << "  -o {output_filename}        : Specify output filename (default: derived from input filename).\n";
     std::cout << "  -off                        : Generate output in .off format (default).\n";
     std::cout << "  -ply                        : Generate output in .ply format.\n";
-    std::cout << "  -sep_dist {D}               : Separation distance in refined subcubes (default: 0 = off).\n";
+    std::cout << "  -sep_dist {D}               : Separation distance in refined subcubes (default: 1 = off).\n";
     std::cout << "  -sep_split {K}              : Number of splits per axis (refined factor K+1, default: 0).\n";
     std::cout << "  -supersample {factor}       : Supersample the input data by the given factor.\n";
     std::cout << "  -multi_isov                 : Use multi iso-vertices mode (default).\n";
