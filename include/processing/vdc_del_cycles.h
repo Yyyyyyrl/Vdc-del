@@ -260,6 +260,7 @@ int find_cycle_containing_facet(
  * @param cycle_facets The facets in the cycle as (cell_index, facet_index) pairs.
  * @param cell_by_index Lookup table for Cell_handle by index.
  * @param dt The Delaunay triangulation.
+ * @param cycle_index Cycle index (only used for trace/debug dumps).
  * @param[out] separation_direction The computed separation direction (unit vector).
  * @return true if a valid separation direction was found, false otherwise.
  */
@@ -268,6 +269,7 @@ bool compute_cycle_separating_direction(
     const std::vector<std::pair<int, int>>& cycle_facets,
     const std::vector<Cell_handle>& cell_by_index,
     const Delaunay& dt,
+    int cycle_index,
     float separation_direction[3]
 );
 
