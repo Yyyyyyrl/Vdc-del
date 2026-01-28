@@ -1488,7 +1488,7 @@ double compute_sphere_radius(
         min_edge_length = grid_spacing;
     }
 
-    std::cout << "calculated sphere radius: " << 0.2 * min_edge_length << std::endl;
+    //std::cout << "calculated sphere radius: " << 0.2 * min_edge_length << std::endl;
     return 0.2 * min_edge_length;
 }
 
