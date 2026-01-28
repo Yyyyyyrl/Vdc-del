@@ -118,9 +118,16 @@ struct VdcParam {
     }
 };
 
-//! @brief Prints the help message to the console.
+//! @brief Prints a brief usage message with options listed compactly.
 /*!
- * This function outputs usage information and available options for the program,
+ * This function outputs a compact usage summary. Used when the user runs the program
+ * with insufficient or invalid arguments. Use -help for the full description.
+ */
+void usage_message();
+
+//! @brief Prints the detailed help message to the console.
+/*!
+ * This function outputs full usage information and available options for the program,
  * including details about input/output configurations and processing modes.
  */
 void print_help();

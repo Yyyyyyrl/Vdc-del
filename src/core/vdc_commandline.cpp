@@ -4,7 +4,22 @@
 #include <cstdlib>
 #include <filesystem>
 
-//! Prints the help message for the program.
+//! Prints a brief usage message (options listed compactly).
+void usage_message()
+{
+    std::cout << "Usage: vdc-del [OPTIONS] <isovalue> <(nhdr/nrrd) raw data file path>\n\n";
+    std::cout << "OPTIONS:\n";
+    std::cout << "  [-o {output_filename}] [-off] [-ply] [-sep_dist {D}] [-sep_split {K}]\n";
+    std::cout << "  [-supersample {factor}] [-multi_isov] [-single_isov]\n";
+    std::cout << "  [-position_delv_on_grid_center] [-foldover] [-use_sep_dir]\n";
+    std::cout << "  [-out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"]]\n";
+    std::cout << "  [-refine_small_angles] [-min_angle {deg}] [-max_angle {deg}]\n";
+    std::cout << "  [-no_dihedral_flip] [-dihedral_angle_threshold {deg}]\n";
+    std::cout << "  [-terse] [-timing_stats] [-no_modcyc] [-help]\n\n";
+    std::cout << "Use -help for detailed option descriptions.\n";
+}
+
+//! Prints the detailed help message for the program.
 void print_help()
 {
     std::cout << "Usage: vdc-del [OPTIONS] <isovalue> <(nhdr/nrrd) raw data file path>\n\n";
@@ -13,22 +28,16 @@ void print_help()
     std::cout << "  -off                        : Generate output in .off format (default).\n";
     std::cout << "  -ply                        : Generate output in .ply format.\n";
     std::cout << "  -sep_dist {D}               : Separation distance in refined subcubes (default: 1 = off).\n";
-    std::cout << "  -sep_split {K}              : Number of splits per axis (refined factor K+1, default: 0).\n";
+    std::cout << "  -sep_split {K}              : Number of cube splits per axis. (default: K=0, no splits)\n";
+    std::cout << "                               K=1 means grid cube is split into 8 subcubes, splitting once in each direction.\n";
     std::cout << "  -supersample {factor}       : Supersample the input data by the given factor.\n";
     std::cout << "  -multi_isov                 : Use multi iso-vertices mode (default).\n";
     std::cout << "  -single_isov                : Use single iso-vertices mode.\n";
     std::cout << "  -position_delv_on_grid_center: Position Delaunay vertices on cube centers.\n";
-    std::cout << "  -position_multi_isov_on_delv: Debug only. For multi-cycle vertices, place all iso-vertices at the Delaunay vertex (disables repositioning).\n";
-    std::cout << "  -multi_isov_trace           : Dump multi-cycle isovertex resolution trace as OFF/TXT under simple_multi_failures_trace/ (subdirs: local/, final/).\n";
     std::cout << "  -foldover                   : Enable Stage 3: within-cycle fan foldover resolution.\n";
     std::cout << "  -use_sep_dir                : Use separation-direction-based resolution (min-sphere of facet normals) instead of reflection candidates.\n";
     std::cout << "  -out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"] : Output Delaunay triangulation to delv_<mesh>.off.\n";
     std::cout << "                               Optional: specify bounding box to crop the output.\n";
-    std::cout << "  -dump_site_selection {json}  : Dump active cube sites (pre/post separation) to a JSON file.\n";
-    std::cout << "  -dump_facet_example {json}   : Dump one isosurface facet + Voronoi edge crossing example to a JSON file.\n";
-    std::cout << "  -dump_multicycle {json}      : Dump one multi-cycle vertex example (cycles, Voronoi edges, centroids) to a JSON file.\n";
-    std::cout << "  -dump_multicycle_vertex {i}  : Choose a specific Delaunay vertex index for -dump_multicycle.\n";
-    std::cout << "  -dump_isovertex_map {txt}    : Dump isovertex->(delv,cycle,position) map as a text file.\n";
     std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
     std::cout << "                               Default trigger: min_angle=20 deg, max_angle=off.\n";
     std::cout << "  -min_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold.\n";
@@ -40,18 +49,34 @@ void print_help()
     std::cout << "  -dihedral_angle_threshold {deg}     : Dihedral angle threshold in degrees (default: 5).\n";
     std::cout << "  -terse                      : Print only the number of vertices/triangles and the output file.\n";
     std::cout << "  -timing_stats               : Print timing statistics after the run.\n";
-    std::cout << "  -debug                      : Enable debug logging ([DEBUG]/[ISO]/[ISO-MATCH]/[CYC-MOD]).\n";
     std::cout << "  -no_modcyc                  : Disable modify-cycles pass (enabled by default).\n";
-    std::cout << "  -help                       : Print this help message.\n";
+    std::cout << "  -help                       : Print this help message.\n\n";
+    std::cout << "DEBUGGING OPTIONS:\n";
+    std::cout << "  -debug                      : Enable debug logging ([DEBUG]/[ISO]/[ISO-MATCH]/[CYC-MOD]).\n";
+    std::cout << "  -position_multi_isov_on_delv: For multi-cycle vertices, place all iso-vertices at the Delaunay vertex (disables repositioning).\n";
+    std::cout << "  -multi_isov_trace           : Dump multi-cycle isovertex resolution trace as OFF/TXT under simple_multi_failures_trace/ (subdirs: local/, final/).\n";
+    std::cout << "  -dump_site_selection {json} : Dump active cube sites (pre/post separation) to a JSON file.\n";
+    std::cout << "  -dump_facet_example {json}  : Dump one isosurface facet + Voronoi edge crossing example to a JSON file.\n";
+    std::cout << "  -dump_multicycle {json}     : Dump one multi-cycle vertex example (cycles, Voronoi edges, centroids) to a JSON file.\n";
+    std::cout << "  -dump_multicycle_vertex {i} : Choose a specific Delaunay vertex index for -dump_multicycle.\n";
+    std::cout << "  -dump_isovertex_map {txt}   : Dump isovertex->(delv,cycle,position) map as a text file.\n";
 }
 
 //! Parses command-line arguments and configures program settings.
 void parse_arguments(int argc, char *argv[], VdcParam &vp)
 {
-    // Print help and exit if there are insufficient arguments.
+    // Handle -help specially: allow it even with insufficient args
+    for (int j = 1; j < argc; ++j) {
+        if (std::string(argv[j]) == "-help") {
+            print_help();
+            exit(EXIT_SUCCESS);
+        }
+    }
+
+    // Print usage and exit if there are insufficient arguments.
     if (argc < 3)
     {
-        print_help();
+        usage_message();
         exit(EXIT_FAILURE);
     }
 
@@ -207,7 +232,7 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         {
             // Handle unknown options.
             std::cerr << "Unknown option: " << arg << "\n";
-            print_help();
+            usage_message();
             exit(EXIT_FAILURE);
         }
         ++i;
@@ -217,7 +242,7 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
     if (i + 2 > argc)
     {
         std::cerr << "Error: Missing required arguments.\n";
-        print_help();
+        usage_message();
         exit(EXIT_FAILURE);
     }
 
