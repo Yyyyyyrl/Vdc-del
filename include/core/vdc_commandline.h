@@ -75,7 +75,7 @@ struct VdcParam {
           refine_max_angle_enabled(false),
           mod_cyc(true),
           flip_small_dihedral_cells(true),
-          dihedral_angle_threshold_deg(5.0),
+          dihedral_angle_threshold_deg(10.0),
           dump_site_selection_json(""),
           dump_facet_example_json(""),
           dump_multicycle_json(""),
