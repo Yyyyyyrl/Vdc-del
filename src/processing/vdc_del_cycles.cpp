@@ -1042,8 +1042,6 @@ static bool triangles_have_nontrivial_intersection(
         const Point& other,
         const Triangle_3& tri
     ) -> bool {
-        // Treat intersections at the shared endpoint as trivial by testing an open segment
-        // starting slightly away from `shared`.
         constexpr double t = 1e-6;
         const double dx = other.x() - shared.x();
         const double dy = other.y() - shared.y();
@@ -1349,24 +1347,6 @@ bool check_self_intersection(
                 TriIntersectionTrace info;
                 TriIntersectionTrace* info_out = (trace_details || log_within) ? &info : nullptr;
                 if (triangles_have_nontrivial_intersection(tris[i], tris[j], info_out)) {
-                    if (log_within) {
-                        static std::unordered_set<int> logged_vertices;
-                        if (logged_vertices.insert(v_idx).second) {
-                            DEBUG_PRINT("[DEL-SELFI-WITHIN] Vertex " << v_idx
-                                        << " cycle " << c
-                                        << " tri(" << i << "," << j << ")"
-                                        << " kind=" << kind_name(info.kind)
-                                        << " shared_count=" << info.shared_count);
-                        }
-                    }
-                    if (trace_details) {
-                        DEBUG_PRINT("[DEL-SELFI-INT] Vertex " << v_idx
-                                    << " within-cycle cycle " << c
-                                    << " tri(" << i << "," << j << ")"
-                                    << " kind=" << kind_name(info.kind)
-                                    << " shared_count=" << info.shared_count);
-                        dump_tri_pair(tris[i], tris[j]);
-                    }
                     return true;
                 }
             }
@@ -1449,47 +1429,38 @@ static std::optional<SelfIntersectionWitness> find_self_intersection_witness(
 double compute_sphere_radius(
     Vertex_handle v,
     const Delaunay& dt,
-    const UnifiedGrid& grid
+    const UnifiedGrid& grid,
+    int sep_split,
+    int supersample_r
 ) {
-    // Sphere radius for multi-cycle isovertex projection: proportional to the
-    // minimum incident Delaunay edge length at the site.
-    std::vector<Cell_handle> incident_cells;
-    incident_cells.reserve(128);
-    dt.incident_cells(v, std::back_inserter(incident_cells));
+    // Suppress unused parameter warning - v is kept for potential future use.
+    (void)v;
+    (void)dt;
 
-    // Compute minimum incident edge length (excluding dummy/infinite neighbors).
-    double min_edge_length = std::numeric_limits<double>::infinity();
-    {
-        std::set<Vertex_handle> neighbor_vertices;
-        for (Cell_handle ch : incident_cells) {
-            if (ch == Cell_handle() || dt.is_infinite(ch)) continue;
-            for (int i = 0; i < 4; ++i) {
-                Vertex_handle vh = ch->vertex(i);
-                if (vh != v && !vh->info().is_dummy && !dt.is_infinite(vh)) {
-                    neighbor_vertices.insert(vh);
-                }
-            }
-        }
+    // Sphere radius for multi-cycle isovertex projection: inscribed sphere
+    // of the effective grid cell that the Delaunay vertex is located in.
+    //
+    // The effective cell side length accounts for:
+    // - sep_split: Number of cube splits per axis (K splits -> factor K+1)
+    //   e.g., -sep_split 2 divides each axis by 3
+    // - supersample_r: Supersample factor
+    //   e.g., -supersample 2 divides each axis by 2
+    //
+    // Formula: effective_side_length = grid_spacing / (subgrid_scale * supersample_scale)
+    // Inscribed sphere radius = 0.5 * effective_side_length
 
-        const Point p = v->point();
-        for (Vertex_handle vh : neighbor_vertices) {
-            const Point q = vh->point();
-            const double dx = p.x() - q.x();
-            const double dy = p.y() - q.y();
-            const double dz = p.z() - q.z();
-            const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-            min_edge_length = std::min(min_edge_length, dist);
-        }
-    }
-
-    // Also consider grid spacing as a fallback (isolated vertex).
     const double grid_spacing = std::min({grid.spacing[0], grid.spacing[1], grid.spacing[2]});
-    if (!std::isfinite(min_edge_length)) {
-        min_edge_length = grid_spacing;
-    }
-
-    //std::cout << "calculated sphere radius: " << 0.2 * min_edge_length << std::endl;
-    return 0.2 * min_edge_length;
+    
+    // Subgrid scale from sep_split: K splits means divide by (K+1)
+    const double subgrid_scale = static_cast<double>(std::max(1, sep_split + 1));
+    
+    // Supersample scale: factor R means divide by R
+    const double supersample_scale = static_cast<double>(std::max(1, supersample_r));
+    
+    const double effective_side_length = grid_spacing / (subgrid_scale * supersample_scale);
+    
+    // Inscribed sphere radius is half the side length of the effective cube
+    return 0.5 * effective_side_length;
 }
 
 // ============================================================================
@@ -2724,7 +2695,9 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
     float isovalue,
     const std::vector<Cell_handle>& cell_by_index,
     IsovertexComputationStats& stats,
-    bool position_multi_isov_on_delv
+    bool position_multi_isov_on_delv,
+    int sep_split,
+    int supersample_r
 ) {
     std::vector<Vertex_handle> multi_cycle_vertices;
     
@@ -2776,7 +2749,7 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                     isovertices[c] = cube_center;
                 }
             } else {
-                const double sphere_radius = compute_sphere_radius(vit, dt, grid);
+                const double sphere_radius = compute_sphere_radius(vit, dt, grid, sep_split, supersample_r);
                 for (size_t c = 0; c < cycles.size(); ++c) {
                     Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
                         dt, grid, isovalue, vit, cycles[c], cell_by_index);
@@ -3728,7 +3701,8 @@ void compute_cycle_isovertices(
     // Stage 1: Compute initial isovertex positions for all active vertices.
     // ========================================================================
     std::vector<Vertex_handle> multi_cycle_vertices = initialize_cycle_isovertices(
-        dt, grid, isovalue, cell_by_index, stats, options.position_multi_isov_on_delv);
+        dt, grid, isovalue, cell_by_index, stats, options.position_multi_isov_on_delv,
+        options.sep_split, options.supersample_r);
 
     if (options.position_multi_isov_on_delv) {
         DEBUG_PRINT("[DEL-ISOV] Skipping multi-cycle repositioning (-position_multi_isov_on_delv).");

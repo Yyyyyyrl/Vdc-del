@@ -198,6 +198,8 @@ struct CycleIsovertexOptions {
     bool foldover = false;                    ///< Enable Stage 3: within-cycle fan foldover resolution.
     bool use_sep_dir = false;                 ///< Use separation-direction-based resolution instead of reflection candidates.
     std::string multi_isov_trace_dir;         ///< Output directory for -multi_isov_trace (empty disables dumps).
+    int sep_split = 0;                        ///< Number of cube splits per axis (K splits -> factor K+1 for effective cell size).
+    int supersample_r = 1;                    ///< Supersample factor (R -> effective cell size divided by R).
 };
 
 /**

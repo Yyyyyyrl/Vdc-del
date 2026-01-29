@@ -345,6 +345,8 @@ int main(int argc, char* argv[]) {
         param.foldover,
         param.use_sep_dir,
         multi_isov_trace_dir,
+        param.sep_split,
+        param.supersample_r,
     };
 
     compute_cycle_isovertices(
