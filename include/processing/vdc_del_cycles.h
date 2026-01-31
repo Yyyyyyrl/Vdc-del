@@ -195,7 +195,7 @@ struct IsovertexComputationStats {
 struct CycleIsovertexOptions {
     bool position_multi_isov_on_delv = false; ///< Debug only: place all multi-cycle isovertices at the Delaunay vertex.
     bool multi_isov_trace = false;            ///< Dump multi-cycle isovertex resolution trace (local/ + final/) as OFF/TXT.
-    bool foldover = false;                    ///< Enable Stage 3: within-cycle fan foldover resolution.
+    bool foldover = false;                    ///< Enable deterministic within-cycle fan foldover resolution (integrated into Stage 2 stabilization).
     bool use_sep_dir = false;                 ///< Use separation-direction-based resolution instead of reflection candidates.
     std::string multi_isov_trace_dir;         ///< Output directory for -multi_isov_trace (empty disables dumps).
     int sep_split = 0;                        ///< Number of cube splits per axis (K splits -> factor K+1 for effective cell size).

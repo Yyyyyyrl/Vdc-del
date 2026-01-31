@@ -34,7 +34,7 @@ void print_help()
     std::cout << "  -multi_isov                 : Use multi iso-vertices mode (default).\n";
     std::cout << "  -single_isov                : Use single iso-vertices mode.\n";
     std::cout << "  -position_delv_on_grid_center: Position Delaunay vertices on cube centers.\n";
-    std::cout << "  -foldover                   : Enable Stage 3: within-cycle fan foldover resolution.\n";
+    std::cout << "  -foldover                   : Enable deterministic within-cycle fan foldover resolution (integrated into Stage 2 stabilization).\n";
     std::cout << "  -use_sep_dir                : Use separation-direction-based resolution (min-sphere of facet normals) instead of reflection candidates.\n";
     std::cout << "  -out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"] : Output Delaunay triangulation to delv_<mesh>.off.\n";
     std::cout << "                               Optional: specify bounding box to crop the output.\n";
