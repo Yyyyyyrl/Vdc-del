@@ -1035,32 +1035,7 @@ static bool triangles_have_nontrivial_intersection(
     const Triangle_3& t2,
     TriIntersectionTrace* trace_out
 ) {
-    constexpr double NEAR_TOL2 = 1e-16; // ~1e-8 distance squared
     TriIntersectionTrace trace;
-    auto segment_interior_intersects_triangle = [](
-        const Point& shared,
-        const Point& other,
-        const Triangle_3& tri
-    ) -> bool {
-        constexpr double t = 1e-6;
-        const double dx = other.x() - shared.x();
-        const double dy = other.y() - shared.y();
-        const double dz = other.z() - shared.z();
-        const double len2 = dx * dx + dy * dy + dz * dz;
-        if (len2 < 1e-24) {
-            return false;
-        }
-
-        const Point nudged(
-            shared.x() + t * dx,
-            shared.y() + t * dy,
-            shared.z() + t * dz);
-        if (nudged == other) {
-            return false;
-        }
-
-        return CGAL::do_intersect(Segment3(nudged, other), tri);
-    };
 
     // Find shared vertices (by exact position, which is stable for shared mesh vertices).
     const std::array<Point, 3> t1v = {t1.vertex(0), t1.vertex(1), t1.vertex(2)};
@@ -1108,73 +1083,122 @@ static bool triangles_have_nontrivial_intersection(
         return false;
     }
 
-    // Shared single vertex: triangles always intersect at that vertex, so avoid triangle/triangle
-    // intersection tests. A non-trivial intersection must involve the opposite edge of one triangle
-    // intersecting the other triangle away from the shared vertex.
-    const Point& s = shared_point;
+    // -------------------------------------------------------------------------
+    // Shared single vertex: orientation-based intersection test.
+    // -------------------------------------------------------------------------
+    // Given triangles (a,b,e) and (c,d,e) sharing vertex e, we determine if they
+    // intersect at any point other than e using CGAL orientation predicates.
+    //
+    // The key insight: if c and d are on the same side of plane(e,a,b), the segment
+    // cd cannot cross triangle (e,a,b) (and vice versa for a,b vs plane(e,c,d)).
+    //
+    // Algorithm:
+    //   orient_c = Orientation(e, a, b, c)
+    //   orient_d = Orientation(e, a, b, d)
+    //   orient_a = Orientation(e, c, d, a)
+    //   orient_b = Orientation(e, c, d, b)
+    //
+    // The triangles intersect non-trivially iff:
+    //   isNotPPorNN(orient_c, orient_d) AND
+    //   isNotPPorNN(orient_a, orient_b) AND
+    //   isNotPPorNN(orient_a, orient_c) AND
+    //   isNotPPorNN(orient_b, orient_d)
+    //
+    // where isNotPPorNN returns true if the two orientations are not both positive
+    // and not both negative (i.e., different signs, or at least one is coplanar).
+    // -------------------------------------------------------------------------
+    const Point& e = shared_point;
 
     std::array<Point, 2> t1_other;
     std::array<Point, 2> t2_other;
     int t1_count = 0;
     int t2_count = 0;
     for (const Point& p : t1v) {
-        if (p != s && t1_count < 2) {
+        if (p != e && t1_count < 2) {
             t1_other[t1_count++] = p;
         }
     }
     for (const Point& p : t2v) {
-        if (p != s && t2_count < 2) {
+        if (p != e && t2_count < 2) {
             t2_other[t2_count++] = p;
         }
     }
 
     if (t1_count != 2 || t2_count != 2) {
+        if (trace_out) {
+            *trace_out = trace;
+        }
         return false;
     }
 
-    const Segment3 t1_opposite(t1_other[0], t1_other[1]);
-    const Segment3 t2_opposite(t2_other[0], t2_other[1]);
+    // Name the non-shared vertices: t1 = (a, b, e), t2 = (c, d, e)
+    const Point& a = t1_other[0];
+    const Point& b = t1_other[1];
+    const Point& c = t2_other[0];
+    const Point& d = t2_other[1];
 
-    if (CGAL::do_intersect(t1_opposite, t2)) {
-        trace.kind = TriIntersectionKind::SHARED_VERTEX_T1_OPPOSITE_SEGMENT;
+    // Helper: returns true if (o1, o2) is NOT (positive, positive) and NOT (negative, negative).
+    // This means: different signs, or at least one is COPLANAR.
+    auto isNotPPorNN = [](CGAL::Orientation o1, CGAL::Orientation o2) -> bool {
+        if (o1 != o2) {
+            return true;  // Different orientations
+        }
+        // Both are the same; check if both are COPLANAR (degenerate case can intersect)
+        if (o1 == CGAL::COPLANAR) {
+            return true;
+        }
+        // Both are POSITIVE or both are NEGATIVE → no intersection across the plane
+        return false;
+    };
+
+    const CGAL::Orientation orient_c = CGAL::orientation(e, a, b, c);
+    const CGAL::Orientation orient_d = CGAL::orientation(e, a, b, d);
+    const CGAL::Orientation orient_a = CGAL::orientation(e, c, d, a);
+    const CGAL::Orientation orient_b = CGAL::orientation(e, c, d, b);
+
+    // Special case: all four points are coplanar with e.
+    // The orientation-based test is too conservative here (returns "may intersect").
+    // Fall back to explicit segment-triangle intersection tests.
+    const bool all_coplanar =
+        (orient_c == CGAL::COPLANAR) &&
+        (orient_d == CGAL::COPLANAR) &&
+        (orient_a == CGAL::COPLANAR) &&
+        (orient_b == CGAL::COPLANAR);
+
+    if (all_coplanar) {
+        // All points are in the same plane. Check for actual overlap:
+        // Does the opposite edge of one triangle intersect the other triangle?
+        const Segment3 t1_opposite(a, b);
+        const Segment3 t2_opposite(c, d);
+        const Triangle_3 tri1(a, b, e);
+        const Triangle_3 tri2(c, d, e);
+
+        if (CGAL::do_intersect(t1_opposite, tri2) || CGAL::do_intersect(t2_opposite, tri1)) {
+            trace.kind = TriIntersectionKind::SHARED_VERTEX_T1_OPPOSITE_SEGMENT;
+            if (trace_out) {
+                *trace_out = trace;
+            }
+            return true;
+        }
         if (trace_out) {
             *trace_out = trace;
         }
-        return true;
-    }
-    if (CGAL::do_intersect(t2_opposite, t1)) {
-        trace.kind = TriIntersectionKind::SHARED_VERTEX_T2_OPPOSITE_SEGMENT;
-        if (trace_out) {
-            *trace_out = trace;
-        }
-        return true;
+        return false;
     }
 
-    // Handle cases where the intersection segment touches the shared vertex and extends into
-    // the interior of the opposite triangle (a common "foldover" failure mode in a fan).
-    if (segment_interior_intersects_triangle(s, t1_other[0], t2)) {
-        trace.kind = TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T1_0;
-        if (trace_out) {
-            *trace_out = trace;
-        }
-        return true;
-    }
-    if (segment_interior_intersects_triangle(s, t1_other[1], t2)) {
-        trace.kind = TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T1_1;
-        if (trace_out) {
-            *trace_out = trace;
-        }
-        return true;
-    }
-    if (segment_interior_intersects_triangle(s, t2_other[0], t1)) {
-        trace.kind = TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T2_0;
-        if (trace_out) {
-            *trace_out = trace;
-        }
-        return true;
-    }
-    if (segment_interior_intersects_triangle(s, t2_other[1], t1)) {
-        trace.kind = TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T2_1;
+    // The triangles intersect at a point other than e iff all four conditions hold:
+    //   - c and d are not strictly on the same side of plane(e,a,b)
+    //   - a and b are not strictly on the same side of plane(e,c,d)
+    //   - a and c are not strictly on the same side (cross-check)
+    //   - b and d are not strictly on the same side (redundant safety)
+    const bool intersects =
+        isNotPPorNN(orient_c, orient_d) &&
+        isNotPPorNN(orient_a, orient_b) &&
+        isNotPPorNN(orient_a, orient_c) &&
+        isNotPPorNN(orient_b, orient_d);
+
+    if (intersects) {
+        trace.kind = TriIntersectionKind::SHARED_VERTEX_T1_OPPOSITE_SEGMENT;  // Generic shared-vertex intersection
         if (trace_out) {
             *trace_out = trace;
         }
@@ -3276,15 +3300,12 @@ static ResolutionResult try_resolve_cycle_fan_foldover_at_vertex_cycle(
     const Point center = v->point();
     const std::vector<Point> baseline_positions = cycle_isovertices;
 
-    // Direction candidates derived from the fan.
-    // 1) Aggregate fan normal: tends to push the isovertex to one consistent side of the fan.
-    // 2) Boundary centroid direction: useful when the fan-normal direction fails.
+    // Direction derived from the fan.
     //
-    // Note: We deliberately try a *small* deterministic set of directions instead of a large,
-    // heuristic "candidate position menu". This keeps the method predictable, and in practice
-    // covers the aneurysm foldover cases:
-    //   - some resolve along the aggregate fan normal,
-    //   - others resolve only along the boundary centroid direction.
+    // We keep this intentionally minimal:
+    //   - primary: normalized sum of fan triangle normals,
+    //   - fallback (only if the sum cancels / is degenerate): direction to the fan boundary centroid.
+    //
     Vector3 sum_n(0, 0, 0);
     double sx = 0.0, sy = 0.0, sz = 0.0;
     int boundary_cnt = 0;
@@ -3309,101 +3330,94 @@ static ResolutionResult try_resolve_cycle_fan_foldover_at_vertex_cycle(
         }
     }
 
-    std::vector<Vector3> dirs;
-    dirs.reserve(2);
-
     const double sum_n_len = vec_norm(sum_n);
+    Vector3 dir(0, 0, 0);
+    const char* dir_label = "fan_normal";
     if (sum_n_len > 1e-12) {
-        dirs.push_back(sum_n / sum_n_len);
-    }
-    if (boundary_cnt > 0) {
+        dir = sum_n / sum_n_len;
+    } else if (boundary_cnt > 0) {
         const Point centroid(sx / boundary_cnt, sy / boundary_cnt, sz / boundary_cnt);
-        const Vector3 cdir = vec_normalize_or(Vector3(center, centroid), Vector3(1, 0, 0));
-        if (dirs.empty() || std::abs(vec_dot(dirs[0], cdir)) < 0.95) {
-            dirs.push_back(cdir);
-        }
-    }
-    if (dirs.empty()) {
-        // Degenerate fan: fall back to a fixed axis to avoid "no direction".
-        dirs.push_back(Vector3(1, 0, 0));
+        dir = vec_normalize_or(Vector3(center, centroid), Vector3(1, 0, 0));
+        dir_label = "boundary_centroid_fallback";
+    } else {
+        // Extremely degenerate fan: fall back to a fixed axis to avoid "no direction".
+        dir = Vector3(1, 0, 0);
+        dir_label = "fixed_axis_fallback";
     }
 
-    // Determine candidate step radii.
+    // Determine the local scale for step size.
     //
-    // Why not use the global `foldover_sphere_radius` directly?
-    // - In several aneurysm cases, the needed correction is *smaller* than that radius.
-    // - Using a local scale derived from the fan boundary is more robust and minimizes movement.
-    const double baseline_r2 = squared_distance(center, baseline_p);
-    const double baseline_r = (baseline_r2 > 0.0) ? std::sqrt(baseline_r2) : 0.0;
-    std::vector<double> radii;
-    radii.reserve(4);
-    if (baseline_r > 1e-12) {
-        // If the baseline is already on a sphere around the Delaunay site, preserve that radius
-        // and primarily change direction (this mirrors the geometric separation behavior).
-        radii.push_back(baseline_r);
-    } else if (min_boundary_r2 < std::numeric_limits<double>::max() && min_boundary_r2 > 1e-24) {
-        const double min_boundary_r = std::sqrt(min_boundary_r2);
-        // Deterministic, small step schedule: try the smallest first to keep movement minimal.
-        radii.push_back(0.10 * min_boundary_r);
-        radii.push_back(0.20 * min_boundary_r);
-        radii.push_back(0.35 * min_boundary_r);
-        radii.push_back(0.50 * min_boundary_r);
+    // We intentionally keep the step schedule tiny (2 radii, 2 signs):
+    // - Most aneurysm foldovers resolve with a small fraction of the boundary scale.
+    // - A single global radius (foldover_sphere_radius) is too large in some cases and can fail
+    //   the within-fan acceptance test.
+    //
+    // Local boundary scale: r_min = min ||q-center|| over all fan boundary vertices q.
+    // If it is unavailable (degenerate), fall back to foldover_sphere_radius.
+    double r_min = 0.0;
+    if (min_boundary_r2 < std::numeric_limits<double>::max() && min_boundary_r2 > 1e-24) {
+        r_min = std::sqrt(min_boundary_r2);
     } else if (foldover_sphere_radius > 1e-12) {
-        // Fallback: no usable boundary scale, so use the global inscribed-radius scale.
-        radii.push_back(foldover_sphere_radius);
+        r_min = foldover_sphere_radius;
     }
-    radii.erase(
-        std::remove_if(radii.begin(), radii.end(), [](double r) { return r <= 1e-12; }),
-        radii.end());
-    std::sort(radii.begin(), radii.end());
-    radii.erase(
-        std::unique(radii.begin(), radii.end(), [](double a, double b) { return std::abs(a - b) <= 1e-12; }),
-        radii.end());
-    if (radii.empty()) {
+    if (r_min <= 1e-12) {
         cycle_isovertices = baseline_positions;
         return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
     }
 
+    // Two deterministic radii (smallest-first).
+    // This is the minimal schedule that still covers our aneurysm regression cases.
+    const double r_small = 0.20 * r_min;
+    const double r_large = 0.50 * r_min;
+
     // Choose a deterministic sign preference that is stable under tiny perturbations:
     // try to keep directions consistent with the current isovertex radial direction (if any).
     const Vector3 baseline_dir = Vector3(center, baseline_p);
-    for (size_t didx = 0; didx < dirs.size(); ++didx) {
-        Vector3 dir = dirs[didx];
-        const char* dir_label = (didx == 0 && sum_n_len > 1e-12) ? "fan_normal" : "boundary_centroid";
-        if (baseline_dir.squared_length() > 1e-24 && vec_dot(dir, baseline_dir) < 0.0) {
-            dir = -dir;
+    if (baseline_dir.squared_length() > 1e-24 && vec_dot(dir, baseline_dir) < 0.0) {
+        dir = -dir;
+    }
+
+    auto try_candidate = [&](double sign, double r) -> std::optional<ResolutionResult> {
+        const Point cand(
+            center.x() + sign * r * dir.x(),
+            center.y() + sign * r * dir.y(),
+            center.z() + sign * r * dir.z());
+        const bool within_ok = !cycle_fan_has_within_cycle_intersection(
+            dt, v, cycle_idx, cand, cell_by_index);
+        if (trace) {
+            DEBUG_PRINT("[DEL-SELFI-FAN] v=" << v->info().index
+                        << " cycle=" << cycle_idx
+                        << " " << dir_label
+                        << " sign=" << (sign > 0.0 ? "+" : "-")
+                        << " r=" << r
+                        << ": within_ok=" << (within_ok ? "YES" : "NO")
+                        << " dir=(" << dir.x() << "," << dir.y() << "," << dir.z() << ")"
+                        << " baseline=(" << baseline_p.x() << "," << baseline_p.y() << "," << baseline_p.z() << ")"
+                        << " cand=(" << cand.x() << "," << cand.y() << "," << cand.z() << ")");
+        }
+        if (!within_ok) {
+            return std::nullopt;
         }
 
-        for (double sign : {+1.0, -1.0}) {
-            for (double r : radii) {
-                const Point cand(
-                    center.x() + sign * r * dir.x(),
-                    center.y() + sign * r * dir.y(),
-                    center.z() + sign * r * dir.z());
+        cycle_isovertices = baseline_positions;
+        cycle_isovertices[static_cast<size_t>(cycle_idx)] = cand;
+        const bool all_ok = !check_self_intersection(v, cycle_isovertices, dt, cell_by_index);
+        return ResolutionResult{
+            all_ok ? ResolutionStatus::RESOLVED : ResolutionStatus::UNRESOLVED,
+            ResolutionStrategy::GEOMETRIC_SEPARATION};
+    };
 
-                const bool within_ok = !cycle_fan_has_within_cycle_intersection(
-                    dt, v, cycle_idx, cand, cell_by_index);
-                if (trace) {
-                    DEBUG_PRINT("[DEL-SELFI-FAN] v=" << v->info().index
-                                << " cycle=" << cycle_idx
-                                << " " << dir_label
-                                << " sign=" << (sign > 0.0 ? "+" : "-")
-                                << " r=" << r
-                                << ": within_ok=" << (within_ok ? "YES" : "NO")
-                                << " dir=(" << dir.x() << "," << dir.y() << "," << dir.z() << ")"
-                                << " baseline=(" << baseline_p.x() << "," << baseline_p.y() << "," << baseline_p.z() << ")"
-                                << " cand=(" << cand.x() << "," << cand.y() << "," << cand.z() << ")");
-                }
-                if (!within_ok) {
-                    continue;
-                }
-
-                cycle_isovertices = baseline_positions;
-                cycle_isovertices[static_cast<size_t>(cycle_idx)] = cand;
-                const bool all_ok = !check_self_intersection(v, cycle_isovertices, dt, cell_by_index);
-                return {all_ok ? ResolutionStatus::RESOLVED : ResolutionStatus::UNRESOLVED,
-                        ResolutionStrategy::GEOMETRIC_SEPARATION};
-            }
+    // Minimal deterministic candidate list (4 tries):
+    //   (1) +r_small, (2) -r_small, (3) +r_large, (4) -r_large
+    for (double r : {r_small, r_large}) {
+        if (r <= 1e-12) {
+            continue;
+        }
+        if (auto res = try_candidate(+1.0, r)) {
+            return *res;
+        }
+        if (auto res = try_candidate(-1.0, r)) {
+            return *res;
         }
     }
 
