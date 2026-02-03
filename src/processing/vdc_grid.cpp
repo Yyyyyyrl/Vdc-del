@@ -304,6 +304,11 @@ UnifiedGrid load_nrrd_data(const std::string &file_path)
         unsigned char *data_ptr = static_cast<unsigned char *>(nrrd->data);
         grid.flat_data = convert_to_float_vector(data_ptr, total_size);
     }
+    else if (nrrd->type == nrrdTypeUShort)
+    {
+        unsigned short *data_ptr = static_cast<unsigned short *>(nrrd->data);
+        grid.flat_data = convert_to_float_vector(data_ptr, total_size);
+    }
     else
     {
         std::cerr << "Unsupported NRRD data type." << std::endl;
