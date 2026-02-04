@@ -1538,6 +1538,179 @@ static bool have_min_separation(const std::vector<Point>& candidate, double min_
 }
 
 // ============================================================================
+//  Move-Cap: Bound multi-cycle isovertex movement by opposite facet planes
+// ============================================================================
+//
+// Motivation (aneurysm foldover pattern):
+// - Multi-cycle isovertices are intentionally moved away from their Delaunay site (Stage 1)
+//   to separate cycle components.
+// - This movement can cause a neighboring *single-cycle* triangle fan to fold over and
+//   self-intersect globally (even if the multi-cycle vertex itself has no local selfI).
+//
+// Proposed deterministic mitigation:
+// - For a Delaunay vertex v and a specific incident cycle C, consider each cycle facet t=(v,*,*)
+//   (t is an isosurface facet).
+// - For each incident tetrahedron Δ that contains t (both adjacent cells),
+//   let t' be the face of Δ opposite v (i.e., the face NOT containing v).
+// - If the dihedral angle between t and t' is acute (< 90°), then the distance from v to
+//   the plane of t' is an upper bound on how far the cycle's isovertex can move away from v
+//   without crossing that plane.
+// - We take maxdist = min over all such (acute) constraints, and cap the projection radius by
+//   cap_r = min(r_inscribed, 0.5 * maxdist).
+static int find_facet_index_in_neighbor_across(
+    const Cell_handle& cell,
+    const Cell_handle& neighbor
+) {
+    if (cell == Cell_handle() || neighbor == Cell_handle()) {
+        return -1;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (neighbor->neighbor(i) == cell) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool compute_unit_normal_toward_cell(
+    const Delaunay& dt,
+    const Cell_handle& cell,
+    int facet_idx,
+    Vector3* out_unit_normal
+) {
+    if (out_unit_normal == nullptr) {
+        return false;
+    }
+    if (cell == Cell_handle() || dt.is_infinite(cell)) {
+        return false;
+    }
+    if (facet_idx < 0 || facet_idx >= 4) {
+        return false;
+    }
+
+    // Facet facet_idx is opposite vertex facet_idx; use CGAL's cyclic ordering.
+    const Point p0 = cell->vertex((facet_idx + 1) % 4)->point();
+    const Point p1 = cell->vertex((facet_idx + 2) % 4)->point();
+    const Point p2 = cell->vertex((facet_idx + 3) % 4)->point();
+
+    Vector3 n = vec_cross(Vector3(p0, p1), Vector3(p0, p2));
+    const double len = vec_norm(n);
+    if (len < 1e-12) {
+        return false;
+    }
+    n = n / len;
+
+    // Orient toward the tetrahedron interior using the vertex opposite this facet.
+    // (This matches the robust orientation used in compute_cycle_separating_direction().)
+    const Vertex_handle opposite_vh = cell->vertex(facet_idx);
+    if (opposite_vh == Vertex_handle() || dt.is_infinite(opposite_vh)) {
+        return false;
+    }
+    const Vector3 to_opposite(p0, opposite_vh->point());
+    if (vec_dot(n, to_opposite) < 0.0) {
+        n = -n;
+    }
+
+    *out_unit_normal = n;
+    return true;
+}
+
+static double compute_cycle_maxdist_to_opposite_face_planes(
+    const Delaunay& dt,
+    const std::vector<Cell_handle>& cell_by_index,
+    Vertex_handle v,
+    int cycle_idx
+) {
+    if (v == Vertex_handle() || !v->info().active || v->info().is_dummy) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const auto& cycles = v->info().facet_cycles;
+    if (cycle_idx < 0 || cycle_idx >= static_cast<int>(cycles.size())) {
+        return std::numeric_limits<double>::infinity();
+    }
+    const auto& cycle_facets = cycles[static_cast<size_t>(cycle_idx)];
+    if (cycle_facets.empty()) {
+        return std::numeric_limits<double>::infinity();
+    }
+
+    const Point w = v->point(); // Delaunay site position (movement center)
+    double maxdist = std::numeric_limits<double>::infinity();
+
+    for (const auto& [cell_idx, facet_idx_pos] : cycle_facets) {
+        Cell_handle cell_pos = lookup_cell(cell_by_index, cell_idx);
+        if (cell_pos == Cell_handle() || dt.is_infinite(cell_pos)) {
+            continue;
+        }
+        if (facet_idx_pos < 0 || facet_idx_pos >= 4) {
+            continue;
+        }
+
+        // The facet t is shared by two cells (positive + negative). Evaluate both tetrahedra Δ.
+        struct IncidentCell {
+            Cell_handle ch;
+            int facet_idx = -1; // facet index of t within this cell
+        };
+        IncidentCell incident[2];
+        incident[0] = {cell_pos, facet_idx_pos};
+        incident[1] = {cell_pos->neighbor(facet_idx_pos), -1};
+        if (incident[1].ch != Cell_handle() && !dt.is_infinite(incident[1].ch)) {
+            incident[1].facet_idx = find_facet_index_in_neighbor_across(cell_pos, incident[1].ch);
+            if (incident[1].facet_idx < 0) {
+                incident[1].ch = Cell_handle();
+            }
+        } else {
+            incident[1].ch = Cell_handle();
+        }
+
+        for (const IncidentCell& ic : incident) {
+            const Cell_handle Delta = ic.ch;
+            const int t_facet_idx = ic.facet_idx;
+            if (Delta == Cell_handle()) {
+                continue;
+            }
+            if (t_facet_idx < 0 || t_facet_idx >= 4) {
+                continue;
+            }
+
+            const int v_local = find_vertex_index_in_cell(Delta, v);
+            if (v_local < 0 || v_local >= 4) {
+                continue;
+            }
+            if (v_local == t_facet_idx) {
+                // v must be a vertex of facet t.
+                continue;
+            }
+
+            // t' is the face of Δ opposite v.
+            const int tprime_facet_idx = v_local;
+
+            Vector3 nt, ntp;
+            if (!compute_unit_normal_toward_cell(dt, Delta, t_facet_idx, &nt)) {
+                continue;
+            }
+            if (!compute_unit_normal_toward_cell(dt, Delta, tprime_facet_idx, &ntp)) {
+                continue;
+            }
+
+            // Acute dihedral (< 90°) between the two faces, using consistent (cell-toward) normals.
+            if (vec_dot(nt, ntp) >= 0.0) {
+                continue;
+            }
+
+            // w' is the vertex of t' not shared by t: it is exactly the vertex opposite t in Δ.
+            const Point wprime = Delta->vertex(t_facet_idx)->point();
+            const double dist = std::abs(vec_dot(Vector3(w, wprime), ntp));
+            if (dist < maxdist) {
+                maxdist = dist;
+            }
+        }
+    }
+
+    return maxdist;
+}
+
+// ============================================================================
 //  Orientation/Half-space cycle separation
 // ============================================================================
 
@@ -2136,11 +2309,10 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
 	            const bool has_sep1 = compute_cycle_separating_direction(
 	                v, cycles[1], cell_by_index, dt, 1, sep_dir1);
 
-	            if (has_sep0 || has_sep1) {
-	                // Compute a reasonable radius: distance from center to baseline positions
-	                const double r0 = std::sqrt(squared_distance(center, vpos0));
-	                const double r1 = std::sqrt(squared_distance(center, vpos1));
-	                const double avg_r = (r0 + r1) * 0.5;
+		            if (has_sep0 || has_sep1) {
+		                // Compute a reasonable radius: distance from center to baseline positions
+		                const double r0 = std::sqrt(squared_distance(center, vpos0));
+		                const double r1 = std::sqrt(squared_distance(center, vpos1));
 
                 // Helper: move from center in direction dir by distance r
                 auto move_in_dir = [&center](const float dir[3], double r) -> Point {
@@ -2151,21 +2323,21 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                     );
                 };
 
-	                // Candidate: move cycle0 along its separation direction
-	                if (has_sep0) {
-	                    std::vector<Point> cand = baseline_positions;
-	                    cand[0] = move_in_dir(sep_dir0, avg_r);
-	                    consider_positions("sep_dir0", std::move(cand));
-	                }
+		                // Candidate: move cycle0 along its separation direction
+		                if (has_sep0) {
+		                    std::vector<Point> cand = baseline_positions;
+		                    cand[0] = move_in_dir(sep_dir0, r0);
+		                    consider_positions("sep_dir0", std::move(cand));
+		                }
 
-	                // Candidate: move cycle1 along its separation direction
-	                if (has_sep1) {
-	                    std::vector<Point> cand = baseline_positions;
-	                    cand[1] = move_in_dir(sep_dir1, avg_r);
-	                    consider_positions("sep_dir1", std::move(cand));
-	                }
-	            }
-	        };
+		                // Candidate: move cycle1 along its separation direction
+		                if (has_sep1) {
+		                    std::vector<Point> cand = baseline_positions;
+		                    cand[1] = move_in_dir(sep_dir1, r1);
+		                    consider_positions("sep_dir1", std::move(cand));
+		                }
+		            }
+		        };
 
         // ====================================================================
         // Candidate generation
@@ -2760,6 +2932,7 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
     const std::vector<Cell_handle>& cell_by_index,
     IsovertexComputationStats& stats,
     bool position_multi_isov_on_delv,
+    bool move_cap,
     int sep_split,
     int supersample_r
 ) {
@@ -2814,11 +2987,30 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                 }
             } else {
                 const double sphere_radius = compute_sphere_radius(vit, dt, grid, sep_split, supersample_r);
+                const bool trace_cap = vdc_debug::trace_selfi_enabled(vit->info().index);
                 for (size_t c = 0; c < cycles.size(); ++c) {
                     Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
                         dt, grid, isovalue, vit, cycles[c], cell_by_index);
 
-                    isovertices[c] = project_to_sphere(centroid, cube_center, sphere_radius);
+                    double maxdist = std::numeric_limits<double>::infinity();
+                    if (move_cap) {
+                        maxdist = compute_cycle_maxdist_to_opposite_face_planes(
+                            dt, cell_by_index, vit, static_cast<int>(c));
+                    }
+                    const double cap_radius =
+                        (move_cap && std::isfinite(maxdist) ? std::min(sphere_radius, 0.5 * maxdist)
+                                                            : sphere_radius);
+
+                    if (trace_cap) {
+                        DEBUG_PRINT("[DEL-MOVE-CAP] v=" << vit->info().index
+                                    << " cycle=" << c
+                                    << " r1=" << sphere_radius
+                                    << " maxdist=" << maxdist
+                                    << " cap_r=" << cap_radius
+                                    << (move_cap ? "" : " (disabled)"));
+                    }
+
+                    isovertices[c] = project_to_sphere(centroid, cube_center, cap_radius);
                 }
             }
             multi_cycle_vertices.push_back(vit);
@@ -3702,7 +3894,7 @@ void compute_cycle_isovertices(
     // ========================================================================
     std::vector<Vertex_handle> multi_cycle_vertices = initialize_cycle_isovertices(
         dt, grid, isovalue, cell_by_index, stats, options.position_multi_isov_on_delv,
-        options.sep_split, options.supersample_r);
+        options.move_cap, options.sep_split, options.supersample_r);
 
     if (options.position_multi_isov_on_delv) {
         DEBUG_PRINT("[DEL-ISOV] Skipping multi-cycle repositioning (-position_multi_isov_on_delv).");

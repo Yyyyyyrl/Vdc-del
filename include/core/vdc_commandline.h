@@ -26,6 +26,7 @@ struct VdcParam {
     bool multi_isov_trace = false; //!< Dumps multi-cycle isovertex trace (local/ + final/) as OFF/TXT files
     bool foldover = false;         //!< Enable Stage 3: within-cycle fan foldover resolution
     bool use_sep_dir = false;      //!< Use separation-direction-based resolution instead of reflection candidates
+    bool move_cap = true;          //!< Enable deterministic move-cap for multi-cycle isovertex projection (default: enabled)
     bool out_delv = false;         //!< Output Delaunay triangulation to delv_xxx.off
     bool out_delv_has_bbox = false; //!< If true, crop Delaunay output to bounding box
     double out_delv_bbox_min[3] = {0, 0, 0}; //!< Min corner of bounding box for -out_delv
@@ -67,6 +68,7 @@ struct VdcParam {
           multi_isov_trace(false),
           foldover(false),
           use_sep_dir(false),
+          move_cap(true),
           out_delv(false),
           terse(false),
           timing_stats(false),
@@ -104,6 +106,7 @@ struct VdcParam {
         out << "  Position multi IsoV on DelV: " << (position_multi_isov_on_delv ? "true" : "false") << "\n";
         out << "  Multi IsoV trace: " << (multi_isov_trace ? "true" : "false") << "\n";
         out << "  Foldover: " << (foldover ? "true" : "false") << "\n";
+        out << "  Move-cap: " << (move_cap ? "true" : "false") << "\n";
         out << "  Out DelV: " << (out_delv ? "true" : "false") << "\n";
         out << "  Terse: " << (terse ? "true" : "false") << "\n";
         out << "  Timing stats: " << (timing_stats ? "true" : "false") << "\n";

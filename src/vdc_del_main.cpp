@@ -344,6 +344,7 @@ int main(int argc, char* argv[]) {
         param.multi_isov_trace,
         param.foldover,
         param.use_sep_dir,
+        param.move_cap,
         multi_isov_trace_dir,
         param.sep_split,
         param.supersample_r,

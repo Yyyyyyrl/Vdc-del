@@ -11,7 +11,7 @@ void usage_message()
     std::cout << "OPTIONS:\n";
     std::cout << "  [-o {output_filename}] [-off] [-ply] [-sep_dist {D}] [-sep_split {K}]\n";
     std::cout << "  [-supersample {factor}] [-multi_isov] [-single_isov]\n";
-    std::cout << "  [-position_delv_on_grid_center] [-foldover] [-use_sep_dir]\n";
+    std::cout << "  [-position_delv_on_grid_center] [-foldover] [-use_sep_dir] [-move_cap] [-no_move_cap]\n";
     std::cout << "  [-out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"]]\n";
     std::cout << "  [-refine_small_angles] [-min_angle {deg}] [-max_angle {deg}]\n";
     std::cout << "  [-no_dihedral_flip] [-dihedral_angle_threshold {deg}]\n";
@@ -36,6 +36,8 @@ void print_help()
     std::cout << "  -position_delv_on_grid_center: Position Delaunay vertices on cube centers.\n";
     std::cout << "  -foldover                   : Enable deterministic within-cycle fan foldover resolution (integrated into Stage 2 stabilization).\n";
     std::cout << "  -use_sep_dir                : Use separation-direction-based resolution (min-sphere of facet normals) instead of reflection candidates.\n";
+    std::cout << "  -move_cap                   : Enable deterministic move-cap for multi-cycle isovertex projection (default).\n";
+    std::cout << "  -no_move_cap                : Disable move-cap (restores the pre-cap multi-cycle projection radius).\n";
     std::cout << "  -out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"] : Output Delaunay triangulation to delv_<mesh>.off.\n";
     std::cout << "                               Optional: specify bounding box to crop the output.\n";
     std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
@@ -142,6 +144,14 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         else if (arg == "-use_sep_dir")
         {
             vp.use_sep_dir = true;
+        }
+        else if (arg == "-move_cap")
+        {
+            vp.move_cap = true;
+        }
+        else if (arg == "-no_move_cap")
+        {
+            vp.move_cap = false;
         }
         else if (arg == "-out_delv")
         {
