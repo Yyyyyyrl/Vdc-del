@@ -70,7 +70,7 @@ struct VdcParam {
           foldover(false),
           use_sep_dir(false),
           move_cap(true),
-          move_cap_strict(false),
+          move_cap_strict(true),
           out_delv(false),
           terse(false),
           timing_stats(false),

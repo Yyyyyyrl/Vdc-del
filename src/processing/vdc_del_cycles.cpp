@@ -1680,6 +1680,18 @@ static double compute_cycle_maxdist_to_opposite_face_planes(
             // t' is the face of Δ opposite v.
             const int tprime_facet_idx = v_local;
 
+            // For strict-move-cap diagnostics, record whether t' crosses the isovalue.
+            bool tprime_crosses_isov = false;
+            bool tprime_neigh_pos = false;
+            {
+                Cell_handle tprime_neigh = Delta->neighbor(tprime_facet_idx);
+                if (tprime_neigh != Cell_handle() && !dt.is_infinite(tprime_neigh)) {
+                    tprime_neigh_pos = tprime_neigh->info().flag_positive;
+                    tprime_crosses_isov =
+                        (Delta->info().flag_positive != tprime_neigh_pos);
+                }
+            }
+
             if (require_tprime_crosses_isov) {
                 const bool crosses_isov =
                     tprime_crosses_isov;
@@ -3000,7 +3012,7 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                     if (move_cap) {
                         maxdist = compute_cycle_maxdist_to_opposite_face_planes(
                             dt, cell_by_index, vit, static_cast<int>(c),
-                            move_cap_strict);
+                            /*require_tprime_crosses_isov=*/move_cap_strict);
                     }
                     const double cap_radius =
                         (move_cap && std::isfinite(maxdist) ? std::min(sphere_radius, 0.5 * maxdist)
