@@ -20,6 +20,7 @@
 #include <limits>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <iomanip>
 #include <stdexcept>
@@ -1540,14 +1541,7 @@ static bool have_min_separation(const std::vector<Point>& candidate, double min_
 // ============================================================================
 //  Move-Cap: Bound multi-cycle isovertex movement by opposite facet planes
 // ============================================================================
-//
-// Motivation (aneurysm foldover pattern):
-// - Multi-cycle isovertices are intentionally moved away from their Delaunay site (Stage 1)
-//   to separate cycle components.
-// - This movement can cause a neighboring *single-cycle* triangle fan to fold over and
-//   self-intersect globally (even if the multi-cycle vertex itself has no local selfI).
-//
-// Proposed deterministic mitigation:
+
 // - For a Delaunay vertex v and a specific incident cycle C, consider each cycle facet t=(v,*,*)
 //   (t is an isosurface facet).
 // - For each incident tetrahedron Δ that contains t (both adjacent cells),
@@ -1619,7 +1613,8 @@ static double compute_cycle_maxdist_to_opposite_face_planes(
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
     Vertex_handle v,
-    int cycle_idx
+    int cycle_idx,
+    bool require_tprime_crosses_isov
 ) {
     if (v == Vertex_handle() || !v->info().active || v->info().is_dummy) {
         return std::numeric_limits<double>::infinity();
@@ -1684,6 +1679,14 @@ static double compute_cycle_maxdist_to_opposite_face_planes(
 
             // t' is the face of Δ opposite v.
             const int tprime_facet_idx = v_local;
+
+            if (require_tprime_crosses_isov) {
+                const bool crosses_isov =
+                    tprime_crosses_isov;
+                if (!crosses_isov) {
+                    continue;
+                }
+            }
 
             Vector3 nt, ntp;
             if (!compute_unit_normal_toward_cell(dt, Delta, t_facet_idx, &nt)) {
@@ -2933,6 +2936,7 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
     IsovertexComputationStats& stats,
     bool position_multi_isov_on_delv,
     bool move_cap,
+    bool move_cap_strict,
     int sep_split,
     int supersample_r
 ) {
@@ -2995,7 +2999,8 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                     double maxdist = std::numeric_limits<double>::infinity();
                     if (move_cap) {
                         maxdist = compute_cycle_maxdist_to_opposite_face_planes(
-                            dt, cell_by_index, vit, static_cast<int>(c));
+                            dt, cell_by_index, vit, static_cast<int>(c),
+                            move_cap_strict);
                     }
                     const double cap_radius =
                         (move_cap && std::isfinite(maxdist) ? std::min(sphere_radius, 0.5 * maxdist)
@@ -3007,7 +3012,7 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                                     << " r1=" << sphere_radius
                                     << " maxdist=" << maxdist
                                     << " cap_r=" << cap_radius
-                                    << (move_cap ? "" : " (disabled)"));
+                                    << (move_cap ? (move_cap_strict ? " (strict)" : " (relax)") : " (disabled)"));
                     }
 
                     isovertices[c] = project_to_sphere(centroid, cube_center, cap_radius);
@@ -3894,7 +3899,7 @@ void compute_cycle_isovertices(
     // ========================================================================
     std::vector<Vertex_handle> multi_cycle_vertices = initialize_cycle_isovertices(
         dt, grid, isovalue, cell_by_index, stats, options.position_multi_isov_on_delv,
-        options.move_cap, options.sep_split, options.supersample_r);
+        options.move_cap, options.move_cap_strict, options.sep_split, options.supersample_r);
 
     if (options.position_multi_isov_on_delv) {
         DEBUG_PRINT("[DEL-ISOV] Skipping multi-cycle repositioning (-position_multi_isov_on_delv).");

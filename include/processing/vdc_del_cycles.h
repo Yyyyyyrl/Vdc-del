@@ -198,6 +198,7 @@ struct CycleIsovertexOptions {
     bool foldover = false;                    ///< Enable deterministic within-cycle fan foldover resolution (integrated into Stage 2 stabilization).
     bool use_sep_dir = false;                 ///< Use separation-direction-based resolution instead of reflection candidates.
     bool move_cap = true;                     ///< Enable deterministic move-cap for multi-cycle Stage 1 projection (acute-dihedral opposite-face constraint).
+    bool move_cap_strict = false;             ///< If true, require opposite face t' crosses the isovalue when computing move-cap (strict mode).
     std::string multi_isov_trace_dir;         ///< Output directory for -multi_isov_trace (empty disables dumps).
     int sep_split = 0;                        ///< Number of cube splits per axis (K splits -> factor K+1 for effective cell size).
     int supersample_r = 1;                    ///< Supersample factor (R -> effective cell size divided by R).

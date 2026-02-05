@@ -345,6 +345,7 @@ int main(int argc, char* argv[]) {
         param.foldover,
         param.use_sep_dir,
         param.move_cap,
+        param.move_cap_strict,
         multi_isov_trace_dir,
         param.sep_split,
         param.supersample_r,
