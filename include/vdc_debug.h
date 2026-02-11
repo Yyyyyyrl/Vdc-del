@@ -98,7 +98,8 @@ void dump_multi_isov_trace_case(
     Vertex_handle v,
     const std::vector<Point>& baseline_positions,
     const Delaunay& dt,
-    const std::vector<Cell_handle>& cell_by_index);
+    const std::vector<Cell_handle>& cell_by_index,
+    bool use_sep_dir);
 
 void finalize_multi_isov_trace(
     const CycleIsovertexOptions& options,

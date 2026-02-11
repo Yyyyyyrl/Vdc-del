@@ -1725,6 +1725,162 @@ static double compute_cycle_maxdist_to_opposite_face_planes(
     return maxdist;
 }
 
+// ---------------------------------------------------------------------------
+// Dihedral-based move gate:
+// For multi-cycle vertices, treat the Delaunay site as the baseline position.
+// If moving a cycle isovertex would reverse tetra orientation across an acute
+// (< 90 deg) dihedral between two incident isosurface facets, reject the move
+// and keep that cycle isovertex at the Delaunay site.
+// ---------------------------------------------------------------------------
+static bool cycle_move_reverses_acute_dihedral_tet_orientation(
+    const Delaunay& dt,
+    const std::vector<Cell_handle>& cell_by_index,
+    Vertex_handle v,
+    int cycle_idx,
+    const Point& moved_position
+) {
+    if (v == Vertex_handle() || !v->info().active || v->info().is_dummy) {
+        return false;
+    }
+    if (v->info().facet_cycles.size() < 2) {
+        return false;
+    }
+
+    const auto& cycles = v->info().facet_cycles;
+    if (cycle_idx < 0 || cycle_idx >= static_cast<int>(cycles.size())) {
+        return false;
+    }
+
+    const Point center = v->point();
+    if (squared_distance(moved_position, center) <= 1e-24) {
+        return false;
+    }
+
+    const auto& cycle_facets = cycles[static_cast<size_t>(cycle_idx)];
+    for (const auto& [cell_idx, facet_idx_pos] : cycle_facets) {
+        Cell_handle cell_pos = lookup_cell(cell_by_index, cell_idx);
+        if (cell_pos == Cell_handle() || dt.is_infinite(cell_pos)) {
+            continue;
+        }
+        if (facet_idx_pos < 0 || facet_idx_pos >= 4) {
+            continue;
+        }
+
+        struct IncidentCell {
+            Cell_handle ch;
+            int facet_idx = -1; // facet index of cycle facet in this cell
+        };
+        IncidentCell incident[2];
+        incident[0] = {cell_pos, facet_idx_pos};
+        incident[1] = {cell_pos->neighbor(facet_idx_pos), -1};
+        if (incident[1].ch != Cell_handle() && !dt.is_infinite(incident[1].ch)) {
+            incident[1].facet_idx = find_facet_index_in_neighbor_across(cell_pos, incident[1].ch);
+            if (incident[1].facet_idx < 0) {
+                incident[1].ch = Cell_handle();
+            }
+        } else {
+            incident[1].ch = Cell_handle();
+        }
+
+        for (const IncidentCell& ic : incident) {
+            const Cell_handle Delta = ic.ch;
+            const int t_facet_idx = ic.facet_idx;
+            if (Delta == Cell_handle() || t_facet_idx < 0 || t_facet_idx >= 4) {
+                continue;
+            }
+
+            const int v_local = find_vertex_index_in_cell(Delta, v);
+            if (v_local < 0 || v_local >= 4 || v_local == t_facet_idx) {
+                continue;
+            }
+
+            // t' = face opposite moved vertex v in Delta.
+            const int tprime_facet_idx = v_local;
+
+            // Only apply this gate when both faces are isosurface facets.
+            bool tprime_is_isosurface = false;
+            const Cell_handle tprime_neigh = Delta->neighbor(tprime_facet_idx);
+            if (tprime_neigh != Cell_handle() && !dt.is_infinite(tprime_neigh)) {
+                tprime_is_isosurface =
+                    (Delta->info().flag_positive != tprime_neigh->info().flag_positive);
+            }
+            if (!tprime_is_isosurface) {
+                continue;
+            }
+
+            Vector3 nt, ntp;
+            if (!compute_unit_normal_toward_cell(dt, Delta, t_facet_idx, &nt)) {
+                continue;
+            }
+            if (!compute_unit_normal_toward_cell(dt, Delta, tprime_facet_idx, &ntp)) {
+                continue;
+            }
+
+            // Acute dihedral (< 90 deg) <=> angle between inward normals > 90 deg.
+            if (vec_dot(nt, ntp) >= 0.0) {
+                continue;
+            }
+
+            const Point a = Delta->vertex((tprime_facet_idx + 1) % 4)->point();
+            const Point b = Delta->vertex((tprime_facet_idx + 2) % 4)->point();
+            const Point c = Delta->vertex((tprime_facet_idx + 3) % 4)->point();
+
+            const CGAL::Orientation base_orient = CGAL::orientation(center, a, b, c);
+            if (base_orient == CGAL::COPLANAR) {
+                continue;
+            }
+            const CGAL::Orientation moved_orient = CGAL::orientation(moved_position, a, b, c);
+            if (moved_orient != base_orient) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+static bool apply_dihedral_orientation_gate_to_cycle_position(
+    const Delaunay& dt,
+    const std::vector<Cell_handle>& cell_by_index,
+    Vertex_handle v,
+    int cycle_idx,
+    Point& position
+) {
+    if (!cycle_move_reverses_acute_dihedral_tet_orientation(
+            dt, cell_by_index, v, cycle_idx, position)) {
+        return false;
+    }
+    position = v->point();
+    return true;
+}
+
+static int apply_dihedral_orientation_gate_to_positions(
+    const Delaunay& dt,
+    const std::vector<Cell_handle>& cell_by_index,
+    Vertex_handle v,
+    std::vector<Point>& positions
+) {
+    if (v == Vertex_handle()) {
+        return 0;
+    }
+    int clamped = 0;
+    const int n = std::min(
+        static_cast<int>(positions.size()),
+        static_cast<int>(v->info().facet_cycles.size()));
+    for (int c = 0; c < n; ++c) {
+        if (apply_dihedral_orientation_gate_to_cycle_position(
+                dt, cell_by_index, v, c, positions[static_cast<size_t>(c)])) {
+            ++clamped;
+        }
+    }
+    if (clamped > 0 && vdc_debug::trace_selfi_enabled(v->info().index)) {
+        DEBUG_PRINT("[DEL-MOVE-GATE] v=" << v->info().index
+                    << " clamped " << clamped
+                    << " cycle move(s) to Delaunay site.");
+    }
+    return clamped;
+}
+
 // ============================================================================
 //  Orientation/Half-space cycle separation
 // ============================================================================
@@ -2237,7 +2393,11 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         return {ResolutionStatus::NOT_NEEDED, ResolutionStrategy::NONE};
     }
 
-    const std::vector<Point> baseline_positions = cycle_isovertices;
+    std::vector<Point> baseline_positions = cycle_isovertices;
+    if (apply_dihedral_orientation_gate_to_positions(
+            dt, cell_by_index, v, baseline_positions) > 0) {
+        cycle_isovertices = baseline_positions;
+    }
 
     std::vector<CycleBoundaryInfo> cycle_data;
     cycle_data.reserve(static_cast<size_t>(num_cycles));
@@ -2260,8 +2420,13 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
 	        };
 
 		        std::vector<CandidateA2> candidates;
-		        // Worst case: 2 sep-dir candidates + 6 reflection candidates.
-		        candidates.reserve(8);
+		        if (use_sep_dir) {
+		            // One directional candidate per cycle.
+		            candidates.reserve(2);
+		        } else {
+		            // Legacy reflection mode for 2-cycle vertices.
+		            candidates.reserve(6);
+		        }
 
         const Point vpos0 = baseline_positions[0];
         const Point vpos1 = baseline_positions[1];
@@ -2269,6 +2434,8 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         auto consider_positions = [&](const char* label, std::vector<Point> positions) {
             CandidateA2 cand;
             cand.positions = std::move(positions);
+            (void)apply_dihedral_orientation_gate_to_positions(
+                dt, cell_by_index, v, cand.positions);
             cand.label = label;
             cand.move2 = 0.0;
             for (size_t i = 0; i < cand.positions.size() && i < baseline_positions.size(); ++i) {
@@ -2419,16 +2586,6 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
             evaluate_candidate(cand);
         }
 
-        // If sep-dir candidates fail to resolve, fall back to reflection candidates.
-        // (Some cycles legitimately have no separating direction: min-sphere center ~ 0.)
-        if (use_sep_dir && !best_resolved) {
-            const size_t start = candidates.size();
-            add_reflection_candidates();
-            for (size_t i = start; i < candidates.size(); ++i) {
-                evaluate_candidate(candidates[i]);
-            }
-        }
-
         if (best_resolved) {
             cycle_isovertices = best_resolved->positions;
             if (geometric_attempt_positions_out) {
@@ -2481,6 +2638,11 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                         newB)) {
                     continue;
                 }
+
+                (void)apply_dihedral_orientation_gate_to_cycle_position(
+                    dt, cell_by_index, v, a, newA);
+                (void)apply_dihedral_orientation_gate_to_cycle_position(
+                    dt, cell_by_index, v, b, newB);
 
                 if (squared_distance(newA, cycle_isovertices[static_cast<size_t>(a)]) > change_eps2) {
                     cycle_isovertices[static_cast<size_t>(a)] = newA;
@@ -2617,6 +2779,9 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         CandidateAN* best_improved = nullptr;
         CandidateAN* best_any = nullptr;
         for (auto& cand : candidates) {
+            (void)apply_dihedral_orientation_gate_to_positions(
+                dt, cell_by_index, v, cand.positions);
+            cand.move2 = compute_move2(cand.positions);
             cand.intersections = count_self_intersection_pairs(v, cand.positions, dt, cell_by_index);
             const bool resolved = (cand.intersections == 0);
             const bool improved =
@@ -2870,10 +3035,9 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
             const std::filesystem::path out_dir =
                 std::filesystem::path(options.multi_isov_trace_dir) / "local";
 
-            // Also dump the deterministic A-only candidate set (both reflections for 2-cycle,
-            // per-cycle reflections for 3+ cycles, plus the pairwise-pass attempt).
+            // Also dump the deterministic A-mode candidate set for the active strategy.
             vdc_debug::dump_multi_isov_trace_case(
-                out_dir, v, baseline_positions, dt, cell_by_index);
+                out_dir, v, baseline_positions, dt, cell_by_index, options.use_sep_dir);
 
             // Match the historical "simple_multi_failures" trace format: baseline + attempt.
             // (baseline is already emitted by vdc_debug::dump_multi_isov_trace_case.)
@@ -3027,7 +3191,10 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                                     << (move_cap ? (move_cap_strict ? " (strict)" : " (relax)") : " (disabled)"));
                     }
 
-                    isovertices[c] = project_to_sphere(centroid, cube_center, cap_radius);
+                    Point projected = project_to_sphere(centroid, cube_center, cap_radius);
+                    (void)apply_dihedral_orientation_gate_to_cycle_position(
+                        dt, cell_by_index, vit, static_cast<int>(c), projected);
+                    isovertices[c] = projected;
                 }
             }
             multi_cycle_vertices.push_back(vit);
@@ -3587,10 +3754,12 @@ static ResolutionResult try_resolve_cycle_fan_foldover_at_vertex_cycle(
     }
 
     auto try_candidate = [&](double sign, double r) -> std::optional<ResolutionResult> {
-        const Point cand(
+        Point cand(
             center.x() + sign * r * dir.x(),
             center.y() + sign * r * dir.y(),
             center.z() + sign * r * dir.z());
+        (void)apply_dihedral_orientation_gate_to_cycle_position(
+            dt, cell_by_index, v, cycle_idx, cand);
         const bool within_ok = !cycle_fan_has_within_cycle_intersection(
             dt, v, cycle_idx, cand, cell_by_index);
         if (trace) {

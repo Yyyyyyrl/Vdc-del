@@ -2174,7 +2174,8 @@ void dump_multi_isov_trace_case(
     Vertex_handle v,
     const std::vector<Point>& baseline_positions,
     const Delaunay& dt,
-    const std::vector<Cell_handle>& cell_by_index
+    const std::vector<Cell_handle>& cell_by_index,
+    bool use_sep_dir
 ) {
     dump_simple_multi_failure_stage(out_dir, v, baseline_positions, dt, cell_by_index, "baseline");
 
@@ -2183,60 +2184,61 @@ void dump_multi_isov_trace_case(
         return;
     }
 
-    const Point center = v->point();
-
-    if (num_cycles == 2) {
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, baseline_positions[1]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_A");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[1] = reflect_through_center(center, baseline_positions[0]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_B");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, baseline_positions[0]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self0");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[1] = reflect_through_center(center, baseline_positions[1]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self1");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, baseline_positions[0]);
-            cand[1] = reflect_through_center(center, baseline_positions[1]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self_both");
-        }
-        {
-            std::vector<Point> cand = baseline_positions;
-            cand[0] = reflect_through_center(center, baseline_positions[1]);
-            cand[1] = reflect_through_center(center, baseline_positions[0]);
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_cross_both");
-        }
-    } else {
-        for (int c = 0; c < num_cycles; ++c) {
-            std::vector<Point> cand = baseline_positions;
-            cand[static_cast<size_t>(c)] =
-                reflect_through_center(center, baseline_positions[static_cast<size_t>(c)]);
-            std::ostringstream stage;
-            stage << "reflect_cycle" << c;
-            dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, stage.str().c_str());
-        }
-
-        for (int a = 0; a < num_cycles; ++a) {
-            for (int b = 0; b < num_cycles; ++b) {
-                if (a == b) continue;
+    if (!use_sep_dir) {
+        const Point center = v->point();
+        if (num_cycles == 2) {
+            {
                 std::vector<Point> cand = baseline_positions;
-                cand[static_cast<size_t>(a)] =
-                    reflect_through_center(center, baseline_positions[static_cast<size_t>(b)]);
+                cand[0] = reflect_through_center(center, baseline_positions[1]);
+                dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_A");
+            }
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[1] = reflect_through_center(center, baseline_positions[0]);
+                dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_B");
+            }
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[0] = reflect_through_center(center, baseline_positions[0]);
+                dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self0");
+            }
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[1] = reflect_through_center(center, baseline_positions[1]);
+                dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self1");
+            }
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[0] = reflect_through_center(center, baseline_positions[0]);
+                cand[1] = reflect_through_center(center, baseline_positions[1]);
+                dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_self_both");
+            }
+            {
+                std::vector<Point> cand = baseline_positions;
+                cand[0] = reflect_through_center(center, baseline_positions[1]);
+                cand[1] = reflect_through_center(center, baseline_positions[0]);
+                dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, "reflect_cross_both");
+            }
+        } else {
+            for (int c = 0; c < num_cycles; ++c) {
+                std::vector<Point> cand = baseline_positions;
+                cand[static_cast<size_t>(c)] =
+                    reflect_through_center(center, baseline_positions[static_cast<size_t>(c)]);
                 std::ostringstream stage;
-                stage << "reflect_cycle" << a << "_from" << b;
+                stage << "reflect_cycle" << c;
                 dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, stage.str().c_str());
+            }
+
+            for (int a = 0; a < num_cycles; ++a) {
+                for (int b = 0; b < num_cycles; ++b) {
+                    if (a == b) continue;
+                    std::vector<Point> cand = baseline_positions;
+                    cand[static_cast<size_t>(a)] =
+                        reflect_through_center(center, baseline_positions[static_cast<size_t>(b)]);
+                    std::ostringstream stage;
+                    stage << "reflect_cycle" << a << "_from" << b;
+                    dump_simple_multi_failure_stage(out_dir, v, cand, dt, cell_by_index, stage.str().c_str());
+                }
             }
         }
     }
@@ -2245,9 +2247,10 @@ void dump_multi_isov_trace_case(
         std::vector<Point> attempt = baseline_positions;
         std::vector<Point> attempt_out;
         (void)try_resolve_multicycle_by_cycle_separation_tests(
-            v, attempt, dt, cell_by_index, &attempt_out, false);
+            v, attempt, dt, cell_by_index, &attempt_out, use_sep_dir);
         if (!attempt_out.empty()) {
-            dump_simple_multi_failure_stage(out_dir, v, attempt_out, dt, cell_by_index, "pairwise_attempt");
+            const char* stage = use_sep_dir ? "sep_dir_attempt" : "pairwise_attempt";
+            dump_simple_multi_failure_stage(out_dir, v, attempt_out, dt, cell_by_index, stage);
         }
     }
 }
@@ -2309,7 +2312,7 @@ void finalize_multi_isov_trace(
         }
 
         final_unresolved.push_back(vh->info().index);
-        dump_multi_isov_trace_case(final_dir, vh, isovertices, dt, cell_by_index);
+        dump_multi_isov_trace_case(final_dir, vh, isovertices, dt, cell_by_index, options.use_sep_dir);
     }
 
     {
