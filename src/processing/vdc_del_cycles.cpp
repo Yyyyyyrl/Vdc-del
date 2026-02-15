@@ -1942,12 +1942,182 @@ static CycleBoundaryInfo gather_cycle_boundary_info(
 typedef CGAL::Min_sphere_of_points_d_traits_3<K, double> MinSphereTraits;
 typedef CGAL::Min_sphere_of_spheres_d<MinSphereTraits> MinSphere;
 
+// Collect all finite cells incident on v0 (by index) for fast membership tests.
+static std::unordered_set<int> collect_incident_finite_cell_indices_for_vertex(
+    const Delaunay& dt,
+    Vertex_handle v0
+) {
+    std::unordered_set<int> out;
+    if (v0 == Vertex_handle()) {
+        return out;
+    }
+
+    std::vector<Cell_handle> incident_cells;
+    dt.incident_cells(v0, std::back_inserter(incident_cells));
+    out.reserve(incident_cells.size());
+    for (Cell_handle ch : incident_cells) {
+        if (ch == Cell_handle() || dt.is_infinite(ch)) {
+            continue;
+        }
+        out.insert(ch->info().index);
+    }
+    return out;
+}
+
+// Pseudocode source: SeparateMultiIsov.docx (user provided).
+// Returns true iff the cells on the cycle side (positive cycle cells) do NOT reach cellA
+// when traversal is constrained to finite cells incident on v0 and with all cycle facets
+// (both sides) treated as barriers.
+static bool are_cycle_cells_separated_from_cellA(
+    Vertex_handle v0,
+    const std::vector<std::pair<int, int>>& cycle_facets,
+    Cell_handle cellA,
+    const std::unordered_set<int>& incident_cell_indices,
+    const std::vector<Cell_handle>& cell_by_index,
+    const Delaunay& dt
+) {
+    if (v0 == Vertex_handle() || cellA == Cell_handle() || dt.is_infinite(cellA)) {
+        return true;
+    }
+    if (cycle_facets.empty()) {
+        return true;
+    }
+
+    const int cellA_idx = cellA->info().index;
+    if (!incident_cell_indices.count(cellA_idx)) {
+        return true;
+    }
+
+    std::unordered_set<int> visited;
+    visited.reserve(incident_cell_indices.size());
+    std::vector<Cell_handle> stackB;
+    stackB.reserve(cycle_facets.size());
+
+    // Initialize barrier + seed stack from cycle facets:
+    // - push positive-side cycle cells;
+    // - mark both positive and mirror (negative) cells as visited.
+    for (const auto& [cell_idx, facet_idx] : cycle_facets) {
+        Cell_handle cell_pos = lookup_cell(cell_by_index, cell_idx);
+        if (cell_pos == Cell_handle() || dt.is_infinite(cell_pos)) {
+            continue;
+        }
+        if (facet_idx < 0 || facet_idx >= 4) {
+            continue;
+        }
+        if (!incident_cell_indices.count(cell_pos->info().index)) {
+            continue;
+        }
+
+        if (visited.insert(cell_pos->info().index).second) {
+            stackB.push_back(cell_pos);
+        }
+
+        Cell_handle cell_neg = cell_pos->neighbor(facet_idx);
+        if (cell_neg != Cell_handle() && !dt.is_infinite(cell_neg) &&
+            incident_cell_indices.count(cell_neg->info().index)) {
+            visited.insert(cell_neg->info().index);
+        }
+    }
+
+    // DFS/BFS over the side seeded by cycle positive cells.
+    while (!stackB.empty()) {
+        Cell_handle cellB = stackB.back();
+        stackB.pop_back();
+        if (cellB == Cell_handle() || dt.is_infinite(cellB)) {
+            continue;
+        }
+
+        if (cellB->info().index == cellA_idx) {
+            return false;
+        }
+
+        // Traverse to adjacent cells that are also incident on v0.
+        for (int k = 0; k < 4; ++k) {
+            Cell_handle cellC = cellB->neighbor(k);
+            if (cellC == Cell_handle() || dt.is_infinite(cellC)) {
+                continue;
+            }
+            const int idxC = cellC->info().index;
+            if (!incident_cell_indices.count(idxC)) {
+                continue;
+            }
+            if (visited.insert(idxC).second) {
+                stackB.push_back(cellC);
+            }
+        }
+    }
+
+    return true;
+}
+
+// Build the non-symmetric separation matrix:
+// is_separated[i][j] == 1 iff cycle i separates its cycle-side cells from a reference
+// cell chosen from cycle j. (i==j is left as 0 by definition/use.)
+static std::vector<std::vector<char>> determine_cycle_separation_matrix(
+    Vertex_handle v0,
+    const std::vector<std::vector<std::pair<int, int>>>& cycles,
+    const std::vector<Cell_handle>& cell_by_index,
+    const Delaunay& dt
+) {
+    const int num_cycles = static_cast<int>(cycles.size());
+    std::vector<std::vector<char>> is_separated(
+        static_cast<size_t>(num_cycles),
+        std::vector<char>(static_cast<size_t>(num_cycles), 0));
+    if (num_cycles <= 1 || v0 == Vertex_handle()) {
+        return is_separated;
+    }
+
+    const std::unordered_set<int> incident_cell_indices =
+        collect_incident_finite_cell_indices_for_vertex(dt, v0);
+    if (incident_cell_indices.empty()) {
+        return is_separated;
+    }
+
+    std::vector<Cell_handle> reference_cell_by_cycle(static_cast<size_t>(num_cycles), Cell_handle());
+    for (int j = 0; j < num_cycles; ++j) {
+        for (const auto& [cell_idx, facet_idx] : cycles[static_cast<size_t>(j)]) {
+            (void)facet_idx;
+            Cell_handle cj = lookup_cell(cell_by_index, cell_idx);
+            if (cj == Cell_handle() || dt.is_infinite(cj)) {
+                continue;
+            }
+            if (!incident_cell_indices.count(cj->info().index)) {
+                continue;
+            }
+            reference_cell_by_cycle[static_cast<size_t>(j)] = cj;
+            break;
+        }
+    }
+
+    for (int i = 0; i < num_cycles; ++i) {
+        for (int j = 0; j < num_cycles; ++j) {
+            if (i == j) {
+                continue;
+            }
+            Cell_handle cellA = reference_cell_by_cycle[static_cast<size_t>(j)];
+            if (cellA == Cell_handle()) {
+                // No valid reference cell for cycle j -> do not force flipping on this basis.
+                is_separated[static_cast<size_t>(i)][static_cast<size_t>(j)] = 1;
+                continue;
+            }
+            const bool sep = are_cycle_cells_separated_from_cellA(
+                v0, cycles[static_cast<size_t>(i)], cellA,
+                incident_cell_indices, cell_by_index, dt);
+            is_separated[static_cast<size_t>(i)][static_cast<size_t>(j)] = sep ? 1 : 0;
+        }
+    }
+
+    return is_separated;
+}
+
 //! @brief Compute a direction that separates new cycle facets from old cycle facets.
 //!
 //! For each facet in the cycle, computes the unit outward normal (pointing toward the
 //! positive cell, i.e., where circumcenter_scalar >= isovalue). Then uses CGAL's
 //! Min_sphere_of_spheres_d to find the smallest enclosing sphere of these normals
 //! (treated as points). The center of this sphere gives the separation direction.
+//! Before min-sphere, normals may be globally flipped for this cycle if the non-symmetric
+//! cycle-separation matrix indicates this cycle is not separated from any other cycle.
 //!
 //! @param v0 The vertex around which the cycle is centered.
 //! @param cycle_facets The facets in the cycle as (cell_index, facet_index) pairs.
@@ -1963,6 +2133,9 @@ bool compute_cycle_separating_direction(
     int cycle_index,
     float separation_direction[3]
 ) {
+    if (v0 == Vertex_handle()) {
+        return false;
+    }
     if (cycle_facets.empty()) {
         return false;
     }
@@ -1970,6 +2143,28 @@ bool compute_cycle_separating_direction(
     const bool trace = vdc_debug::trace_selfi_enabled(v0->info().index);
     const std::string trace_dir = trace ? vdc_debug::trace_selfi_dump_dir() : std::string();
     const bool dump_normals = trace && !trace_dir.empty();
+    const auto& all_cycles = v0->info().facet_cycles;
+    const int num_cycles = static_cast<int>(all_cycles.size());
+
+    // Non-symmetric cycle separation matrix (user-requested behavior):
+    // For this cycle row i, if any j != i is not separated, flip all facet normals
+    // before min-sphere so the resulting direction moves cycle i away from others.
+    std::vector<std::vector<char>> is_separated;
+    std::vector<int> separation_fail_targets;
+    bool flip_normals_for_cycle = false;
+    if (cycle_index >= 0 && cycle_index < num_cycles && num_cycles >= 2) {
+        is_separated = determine_cycle_separation_matrix(v0, all_cycles, cell_by_index, dt);
+        for (int j = 0; j < num_cycles; ++j) {
+            if (j == cycle_index) {
+                continue;
+            }
+            if (!is_separated.empty() &&
+                !is_separated[static_cast<size_t>(cycle_index)][static_cast<size_t>(j)]) {
+                flip_normals_for_cycle = true;
+                separation_fail_targets.push_back(j);
+            }
+        }
+    }
 
     // Collect unit facet normals for each facet in the cycle.
     // Each facet is stored with its positive cell (where scalar >= isovalue).
@@ -1980,6 +2175,15 @@ bool compute_cycle_separating_direction(
     struct FacetNormalDumpEntry {
         int cell_index = -1;
         int facet_index = -1;
+        int cell_sign = 0; // +1 POS, -1 NEG
+        int neighbor_cell_index = -1; // -1 means infinite neighbor
+        int neighbor_facet_index = -1; // facet index in neighbor cell (if finite)
+        int neighbor_sign = 0; // +1 POS, -1 NEG, 0 INF/unknown
+        int normal_points_to_cell_index = -1; // final normal orientation target side
+        int normal_points_to_sign = 0; // +1 POS, -1 NEG, 0 INF/unknown
+        int normal_points_away_cell_index = -1; // opposite side of final normal orientation
+        int normal_points_away_sign = 0; // +1 POS, -1 NEG, 0 INF/unknown
+        bool normal_flip_applied = false;
         int facet_vidx[3] = {-1, -1, -1};
         Point facet_p[3];
         int opposite_vidx = -1;
@@ -1997,6 +2201,8 @@ bool compute_cycle_separating_direction(
     }
 
     int circumcenter_across_count = 0;
+    int normals_point_to_pos_count = 0;
+    int normals_point_to_neg_count = 0;
 
     for (const auto& [cell_idx, facet_idx] : cycle_facets) {
         Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
@@ -2067,6 +2273,42 @@ bool compute_cycle_separating_direction(
             }
         }
 
+        const int cell_sign = cell->info().flag_positive ? +1 : -1;
+        int neighbor_cell_index = -1;
+        int neighbor_facet_index = -1;
+        int neighbor_sign = 0;
+        const Facet mirror = dt.mirror_facet(Facet(cell, facet_idx));
+        Cell_handle neighbor_cell = mirror.first;
+        neighbor_facet_index = mirror.second;
+        if (neighbor_cell != Cell_handle() && !dt.is_infinite(neighbor_cell)) {
+            neighbor_cell_index = neighbor_cell->info().index;
+            neighbor_sign = neighbor_cell->info().flag_positive ? +1 : -1;
+        }
+
+        bool normal_flip_applied = false;
+        if (flip_normals_for_cycle) {
+            normal = -normal;
+            dot_to_opposite = -dot_to_opposite;
+            normal_flip_applied = true;
+        }
+
+        int normal_points_to_cell_index = cell_idx;
+        int normal_points_to_sign = cell_sign;
+        int normal_points_away_cell_index = neighbor_cell_index;
+        int normal_points_away_sign = neighbor_sign;
+        if (normal_flip_applied) {
+            normal_points_to_cell_index = neighbor_cell_index;
+            normal_points_to_sign = neighbor_sign;
+            normal_points_away_cell_index = cell_idx;
+            normal_points_away_sign = cell_sign;
+        }
+
+        if (normal_points_to_sign > 0) {
+            ++normals_point_to_pos_count;
+        } else if (normal_points_to_sign < 0) {
+            ++normals_point_to_neg_count;
+        }
+
         // Store the unit normal as a point (vector from origin)
         normals_as_points.emplace_back(normal.x(), normal.y(), normal.z());
 
@@ -2074,6 +2316,15 @@ bool compute_cycle_separating_direction(
             FacetNormalDumpEntry e;
             e.cell_index = cell_idx;
             e.facet_index = facet_idx;
+            e.cell_sign = cell_sign;
+            e.neighbor_cell_index = neighbor_cell_index;
+            e.neighbor_facet_index = neighbor_facet_index;
+            e.neighbor_sign = neighbor_sign;
+            e.normal_points_to_cell_index = normal_points_to_cell_index;
+            e.normal_points_to_sign = normal_points_to_sign;
+            e.normal_points_away_cell_index = normal_points_away_cell_index;
+            e.normal_points_away_sign = normal_points_away_sign;
+            e.normal_flip_applied = normal_flip_applied;
             for (int k = 0; k < 3; ++k) {
                 e.facet_p[k] = facet_verts[static_cast<size_t>(k)];
                 e.facet_vidx[k] = facet_vhs[static_cast<size_t>(k)]->info().index;
@@ -2110,6 +2361,11 @@ bool compute_cycle_separating_direction(
     const double center_len = std::sqrt(cx * cx + cy * cy + cz * cz);
 
     if (dump_normals) {
+        auto sign_label = [](int s) -> const char* {
+            if (s > 0) return "POS";
+            if (s < 0) return "NEG";
+            return "INF";
+        };
         std::error_code ec;
         std::filesystem::path out_dir(trace_dir);
         std::filesystem::create_directories(out_dir, ec);
@@ -2128,6 +2384,38 @@ bool compute_cycle_separating_direction(
             out << "cycle_facets_total " << cycle_facets.size() << "\n";
             out << "normals_used " << normals_as_points.size() << "\n";
             out << "circumcenter_across_count " << circumcenter_across_count << "\n";
+            out << "normals_point_to_pos_count " << normals_point_to_pos_count << "\n";
+            out << "normals_point_to_neg_count " << normals_point_to_neg_count << "\n";
+            out << "flip_normals_due_to_separation_matrix "
+                << (flip_normals_for_cycle ? 1 : 0) << "\n";
+            out << "num_cycles " << num_cycles << "\n";
+            if (cycle_index >= 0 && cycle_index < num_cycles && !is_separated.empty()) {
+                out << "is_separated_row";
+                for (int j = 0; j < num_cycles; ++j) {
+                    out << " " << static_cast<int>(
+                        is_separated[static_cast<size_t>(cycle_index)][static_cast<size_t>(j)]);
+                }
+                out << "\n";
+                out << "flip_fail_targets";
+                if (separation_fail_targets.empty()) {
+                    out << " none";
+                } else {
+                    for (int j : separation_fail_targets) {
+                        out << " " << j;
+                    }
+                }
+                out << "\n";
+
+                out << "is_separated_matrix:\n";
+                for (int i = 0; i < num_cycles; ++i) {
+                    out << "  row" << i << ":";
+                    for (int j = 0; j < num_cycles; ++j) {
+                        out << " " << static_cast<int>(
+                            is_separated[static_cast<size_t>(i)][static_cast<size_t>(j)]);
+                    }
+                    out << "\n";
+                }
+            }
             out << "min_sphere_center " << cx << " " << cy << " " << cz << "\n";
             out << "min_sphere_center_len " << center_len << "\n";
             out << "eps_no_direction " << 1e-6 << "\n\n";
@@ -2160,6 +2448,7 @@ bool compute_cycle_separating_direction(
             out << "facet_normals:\n";
             for (const auto& e : dump_entries) {
                 out << "facet cell=" << e.cell_index << " fi=" << e.facet_index
+                    << " cell_sign=" << sign_label(e.cell_sign)
                     << " vids=(" << e.facet_vidx[0] << "," << e.facet_vidx[1] << "," << e.facet_vidx[2] << ")"
                     << " p0=(" << e.facet_p[0].x() << "," << e.facet_p[0].y() << "," << e.facet_p[0].z() << ")"
                     << " p1=(" << e.facet_p[1].x() << "," << e.facet_p[1].y() << "," << e.facet_p[1].z() << ")"
@@ -2169,6 +2458,21 @@ bool compute_cycle_separating_direction(
                     << " n=(" << e.nx << "," << e.ny << "," << e.nz << ")"
                     << " dot_to_opp=" << e.dot_to_opposite
                     << " dot_to_circ=" << e.dot_to_circumcenter
+                    << " normal_flip_applied=" << (e.normal_flip_applied ? 1 : 0)
+                    << " normal_points_to_cell="
+                    << (e.normal_points_to_cell_index >= 0
+                        ? std::to_string(e.normal_points_to_cell_index)
+                        : std::string("INF"))
+                    << " normal_points_to_sign=" << sign_label(e.normal_points_to_sign)
+                    << " normal_points_away_tet="
+                    << (e.normal_points_away_cell_index >= 0
+                        ? std::to_string(e.normal_points_away_cell_index)
+                        : std::string("INF"))
+                    << " normal_points_away_sign=" << sign_label(e.normal_points_away_sign)
+                    << " nbr_cell="
+                    << (e.neighbor_cell_index >= 0 ? std::to_string(e.neighbor_cell_index) : std::string("INF"))
+                    << " nbr_fi=" << e.neighbor_facet_index
+                    << " nbr_sign=" << sign_label(e.neighbor_sign)
                     << "\n";
             }
         }
@@ -2183,6 +2487,7 @@ bool compute_cycle_separating_direction(
                         << " used=" << normals_as_points.size()
                         << " circumcenter_across=" << circumcenter_across_count
                         << "/" << normals_as_points.size()
+                        << " flip_normals=" << (flip_normals_for_cycle ? "YES" : "NO")
                         << " center_len=" << center_len
                         << " -> NO_DIRECTION");
         }
@@ -2200,6 +2505,7 @@ bool compute_cycle_separating_direction(
                     << " used=" << normals_as_points.size()
                     << " circumcenter_across=" << circumcenter_across_count
                     << "/" << normals_as_points.size()
+                    << " flip_normals=" << (flip_normals_for_cycle ? "YES" : "NO")
                     << " center_len=" << center_len
                     << " dir=("
                     << separation_direction[0] << ","
@@ -3153,14 +3459,14 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
             stats.single_cycle_count++;
         } else {
             // ----------------------------------------------------------------
-            // Multi-cycle vertex: compute centroids and project to sphere
+            // Multi-cycle vertex: min-sphere separation direction + sphere projection
             // ----------------------------------------------------------------
             // For vertices where the isosurface passes through multiple times
             // (creating multiple cycles), we compute a separate isovertex per cycle.
             // Each isovertex is positioned by:
-            //   1. Computing the centroid of Voronoi edge / isosurface intersections
-            //   2. Projecting this centroid onto a sphere around the Delaunay site
-            // This provides directional separation between cycles.
+            //   1. Computing cycle separating direction using min-sphere of facet normals
+            //   2. Projecting from the Delaunay site along that direction onto a sphere
+            // This matches the directional model used by -use_sep_dir.
             if (position_multi_isov_on_delv) {
                 for (size_t c = 0; c < cycles.size(); ++c) {
                     isovertices[c] = cube_center;
@@ -3168,9 +3474,17 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
             } else {
                 const double sphere_radius = compute_sphere_radius(vit, dt, grid, sep_split, supersample_r);
                 const bool trace_cap = vdc_debug::trace_selfi_enabled(vit->info().index);
+                if (trace_cap) {
+                    // For traced multi-cycle vertices, always dump cycle metadata even when
+                    // this vertex has no local Stage-2 self-intersection.
+                    vdc_debug::maybe_dump_selfi_cycle_metadata(dt, vit, cell_by_index);
+                }
                 for (size_t c = 0; c < cycles.size(); ++c) {
-                    Point centroid = compute_centroid_of_voronoi_edge_and_isosurface(
-                        dt, grid, isovalue, vit, cycles[c], cell_by_index);
+                    // Also dump per-cycle facet normal orientation diagnostics used by
+                    // the separation-direction routine for offline debugging.
+                    float sep_dir[3] = {0.0f, 0.0f, 0.0f};
+                    const bool has_sep_dir = compute_cycle_separating_direction(
+                        vit, cycles[c], cell_by_index, dt, static_cast<int>(c), sep_dir);
 
                     double maxdist = std::numeric_limits<double>::infinity();
                     if (move_cap) {
@@ -3188,10 +3502,21 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                                     << " r1=" << sphere_radius
                                     << " maxdist=" << maxdist
                                     << " cap_r=" << cap_radius
+                                    << " has_sep_dir=" << (has_sep_dir ? "yes" : "no")
                                     << (move_cap ? (move_cap_strict ? " (strict)" : " (relax)") : " (disabled)"));
                     }
 
-                    Point projected = project_to_sphere(centroid, cube_center, cap_radius);
+                    Point projected = cube_center;
+                    if (has_sep_dir) {
+                        projected = Point(
+                            cube_center.x() + cap_radius * static_cast<double>(sep_dir[0]),
+                            cube_center.y() + cap_radius * static_cast<double>(sep_dir[1]),
+                            cube_center.z() + cap_radius * static_cast<double>(sep_dir[2]));
+                    } else if (trace_cap) {
+                        DEBUG_PRINT("[DEL-MOVE-CAP] v=" << vit->info().index
+                                    << " cycle=" << c
+                                    << " no separating direction; fallback to DelV center");
+                    }
                     (void)apply_dihedral_orientation_gate_to_cycle_position(
                         dt, cell_by_index, vit, static_cast<int>(c), projected);
                     isovertices[c] = projected;
@@ -4033,7 +4358,7 @@ static void report_isovertex_statistics(const IsovertexComputationStats& stats) 
  *   Stage 1 (initialize_cycle_isovertices):
  *     Compute initial positions for all active vertices.
  *     - Single-cycle vertices: use the isosurface sample point
- *     - Multi-cycle vertices: compute Voronoi/isosurface centroids and project to sphere
+ *     - Multi-cycle vertices: compute min-sphere separation directions and project to sphere
  *
  *   Stage 2 (resolve_multicycle_self_intersections):
  *     Iteratively resolve local self-intersections on multi-cycle vertices, and (when enabled)
@@ -4065,7 +4390,7 @@ void compute_cycle_isovertices(
     IsovertexComputationStats stats;
 
     // A single global "projection radius" is used throughout:
-    // - Stage 1 uses it to project multi-cycle centroids onto an inscribed sphere.
+    // - Stage 1 uses it to project multi-cycle separation directions onto an inscribed sphere.
     // - Stage 2 uses it (when -foldover is enabled) as a deterministic step size
     //   for within-cycle fan foldover correction.
     //
