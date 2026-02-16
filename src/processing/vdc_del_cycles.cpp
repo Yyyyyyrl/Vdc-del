@@ -2110,6 +2110,174 @@ static std::vector<std::vector<char>> determine_cycle_separation_matrix(
     return is_separated;
 }
 
+struct CycleFoldoverEdgeInfo {
+    bool found = false;
+    int count = 0;
+    int v_low = -1;
+    int v_high = -1;
+    bool incident_on_v0 = false;
+    int other_vidx = -1;
+    Vector3 unit_dir = Vector3(0.0, 0.0, 0.0);
+};
+
+// Detect a within-cycle crossover edge pattern:
+// one (or more) cycle edges shared by >=4 cycle facets.
+// When possible, return a direction along an edge incident on v0.
+static CycleFoldoverEdgeInfo detect_cycle_crossover_edge_direction(
+    Vertex_handle v0,
+    const std::vector<std::pair<int, int>>& cycle_facets,
+    const std::vector<Cell_handle>& cell_by_index,
+    const Delaunay& dt,
+    int* out_candidates_ge4 = nullptr
+) {
+    CycleFoldoverEdgeInfo out;
+    if (out_candidates_ge4) {
+        *out_candidates_ge4 = 0;
+    }
+    if (v0 == Vertex_handle() || cycle_facets.empty()) {
+        return out;
+    }
+
+    struct CycleEdgeMultiplicityEntry {
+        int count = 0;
+        Point p_low;
+        Point p_high;
+        bool has_endpoints = false;
+    };
+
+    std::unordered_map<EdgeKey, CycleEdgeMultiplicityEntry, EdgeKeyHash> edge_multiplicity;
+    edge_multiplicity.reserve(cycle_facets.size() * 3);
+
+    auto count_cycle_edge = [&](const Vertex_handle& va, const Vertex_handle& vb) {
+        if (va == Vertex_handle() || vb == Vertex_handle()) {
+            return;
+        }
+        if (dt.is_infinite(va) || dt.is_infinite(vb)) {
+            return;
+        }
+
+        const int ia = va->info().index;
+        const int ib = vb->info().index;
+        const EdgeKey key = EdgeKey::FromVertexIndices(ia, ib);
+        auto& rec = edge_multiplicity[key];
+        ++rec.count;
+        if (!rec.has_endpoints) {
+            if (key.v0 == ia) {
+                rec.p_low = va->point();
+                rec.p_high = vb->point();
+            } else {
+                rec.p_low = vb->point();
+                rec.p_high = va->point();
+            }
+            rec.has_endpoints = true;
+        }
+    };
+
+    for (const auto& [cell_idx, facet_idx] : cycle_facets) {
+        Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
+        if (cell == Cell_handle() || dt.is_infinite(cell)) {
+            continue;
+        }
+        if (facet_idx < 0 || facet_idx >= 4) {
+            continue;
+        }
+
+        std::array<Vertex_handle, 3> facet_vhs;
+        bool ok = true;
+        for (int k = 0; k < 3; ++k) {
+            const int cell_vertex_idx = (facet_idx + 1 + k) % 4;
+            Vertex_handle vh = cell->vertex(cell_vertex_idx);
+            if (vh == Vertex_handle() || dt.is_infinite(vh)) {
+                ok = false;
+                break;
+            }
+            facet_vhs[static_cast<size_t>(k)] = vh;
+        }
+        if (!ok) {
+            continue;
+        }
+
+        count_cycle_edge(facet_vhs[0], facet_vhs[1]);
+        count_cycle_edge(facet_vhs[1], facet_vhs[2]);
+        count_cycle_edge(facet_vhs[2], facet_vhs[0]);
+    }
+
+    const int v0_index = v0->info().index;
+    int candidates_ge4 = 0;
+    for (const auto& kv : edge_multiplicity) {
+        const EdgeKey& edge_key = kv.first;
+        const CycleEdgeMultiplicityEntry& rec = kv.second;
+        if (rec.count < 4 || !rec.has_endpoints) {
+            continue;
+        }
+
+        ++candidates_ge4;
+
+        const bool incident_on_v0 = (edge_key.v0 == v0_index || edge_key.v1 == v0_index);
+        int other_vidx = -1;
+        Vector3 dir_candidate(0.0, 0.0, 0.0);
+        if (incident_on_v0) {
+            if (edge_key.v0 == v0_index) {
+                other_vidx = edge_key.v1;
+                dir_candidate = Vector3(v0->point(), rec.p_high);
+            } else {
+                other_vidx = edge_key.v0;
+                dir_candidate = Vector3(v0->point(), rec.p_low);
+            }
+        } else {
+            // Non-incident case is rare; orient edge direction consistently away from v0.
+            dir_candidate = Vector3(rec.p_low, rec.p_high);
+            const Point midpoint(
+                0.5 * (rec.p_low.x() + rec.p_high.x()),
+                0.5 * (rec.p_low.y() + rec.p_high.y()),
+                0.5 * (rec.p_low.z() + rec.p_high.z()));
+            if (vec_dot(dir_candidate, Vector3(v0->point(), midpoint)) < 0.0) {
+                dir_candidate = -dir_candidate;
+            }
+        }
+
+        const double dlen = vec_norm(dir_candidate);
+        if (dlen < 1e-12) {
+            continue;
+        }
+
+        bool better = false;
+        if (!out.found) {
+            better = true;
+        } else if (incident_on_v0 != out.incident_on_v0) {
+            // Prefer an edge that actually includes v0.
+            better = incident_on_v0;
+        } else if (rec.count != out.count) {
+            // Prefer stronger multiplicity evidence.
+            better = (rec.count > out.count);
+        } else if (incident_on_v0) {
+            // Deterministic tie-break.
+            better = (other_vidx < out.other_vidx);
+        } else {
+            // Deterministic tie-break for non-incident edges.
+            better = (edge_key.v0 < out.v_low) ||
+                     (edge_key.v0 == out.v_low && edge_key.v1 < out.v_high);
+        }
+
+        if (!better) {
+            continue;
+        }
+
+        out.found = true;
+        out.count = rec.count;
+        out.v_low = edge_key.v0;
+        out.v_high = edge_key.v1;
+        out.incident_on_v0 = incident_on_v0;
+        out.other_vidx = other_vidx;
+        out.unit_dir = dir_candidate / dlen;
+    }
+
+    if (out_candidates_ge4) {
+        *out_candidates_ge4 = candidates_ge4;
+    }
+    return out;
+}
+
 //! @brief Compute a direction that separates new cycle facets from old cycle facets.
 //!
 //! For each facet in the cycle, computes the unit outward normal (pointing toward the
@@ -2171,6 +2339,9 @@ bool compute_cycle_separating_direction(
     // Orient each normal to point toward the positive cell side of the facet plane.
     std::vector<Point> normals_as_points;
     normals_as_points.reserve(cycle_facets.size());
+    int foldover_edge_candidates_ge4 = 0;
+    const CycleFoldoverEdgeInfo crossover_edge_dir = detect_cycle_crossover_edge_direction(
+        v0, cycle_facets, cell_by_index, dt, &foldover_edge_candidates_ge4);
 
     struct FacetNormalDumpEntry {
         int cell_index = -1;
@@ -2359,6 +2530,7 @@ bool compute_cycle_separating_direction(
     const double cz = *center_it;
 
     const double center_len = std::sqrt(cx * cx + cy * cy + cz * cz);
+    constexpr double eps = 1e-6;
 
     if (dump_normals) {
         auto sign_label = [](int s) -> const char* {
@@ -2419,6 +2591,22 @@ bool compute_cycle_separating_direction(
             out << "min_sphere_center " << cx << " " << cy << " " << cz << "\n";
             out << "min_sphere_center_len " << center_len << "\n";
             out << "eps_no_direction " << 1e-6 << "\n\n";
+            out << "foldover_edge_candidates_ge4 " << foldover_edge_candidates_ge4 << "\n";
+            out << "foldover_edge_selected";
+            if (crossover_edge_dir.found) {
+                out << " " << crossover_edge_dir.v_low
+                    << " " << crossover_edge_dir.v_high
+                    << " count=" << crossover_edge_dir.count
+                    << " incident_on_v0=" << (crossover_edge_dir.incident_on_v0 ? 1 : 0)
+                    << " other_vidx=" << crossover_edge_dir.other_vidx
+                    << " dir=(" << crossover_edge_dir.unit_dir.x()
+                    << "," << crossover_edge_dir.unit_dir.y()
+                    << "," << crossover_edge_dir.unit_dir.z() << ")";
+            } else {
+                out << " none";
+            }
+            out << "\n";
+            out << "foldover_fallback_used 0\n\n";
 
             // Aggregate statistics about the normal distribution.
             double sx = 0.0, sy = 0.0, sz = 0.0;
@@ -2479,7 +2667,6 @@ bool compute_cycle_separating_direction(
     }
 
     // If center is very close to origin, normals span all directions - no separation
-    constexpr double eps = 1e-6;
     if (center_len < eps) {
         if (trace) {
             DEBUG_PRINT("[DEL-SEP-DIR] v=" << v0->info().index
@@ -2790,42 +2977,93 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         };
 
 	        auto add_sep_dir_candidates = [&]() {
-	            float sep_dir0[3] = {0, 0, 0};
-	            float sep_dir1[3] = {0, 0, 0};
-	            const bool has_sep0 = compute_cycle_separating_direction(
-	                v, cycles[0], cell_by_index, dt, 0, sep_dir0);
-	            const bool has_sep1 = compute_cycle_separating_direction(
-	                v, cycles[1], cell_by_index, dt, 1, sep_dir1);
+	            struct SepCycleState {
+	                bool has_foldover_edge = false;
+	                CycleFoldoverEdgeInfo foldover;
+	                bool has_sep_dir = false;
+	                float sep_dir[3] = {0, 0, 0};
+	            };
 
-		            if (has_sep0 || has_sep1) {
-		                // Compute a reasonable radius: distance from center to baseline positions
-		                const double r0 = std::sqrt(squared_distance(center, vpos0));
-		                const double r1 = std::sqrt(squared_distance(center, vpos1));
+	            std::array<SepCycleState, 2> st;
+	            int fold_candidates0 = 0;
+	            int fold_candidates1 = 0;
+	            st[0].foldover = detect_cycle_crossover_edge_direction(
+	                v, cycles[0], cell_by_index, dt, &fold_candidates0);
+	            st[1].foldover = detect_cycle_crossover_edge_direction(
+	                v, cycles[1], cell_by_index, dt, &fold_candidates1);
+	            st[0].has_foldover_edge = st[0].foldover.found;
+	            st[1].has_foldover_edge = st[1].foldover.found;
 
-                // Helper: move from center in direction dir by distance r
-                auto move_in_dir = [&center](const float dir[3], double r) -> Point {
-                    return Point(
-                        center.x() + r * dir[0],
-                        center.y() + r * dir[1],
-                        center.z() + r * dir[2]
-                    );
-                };
+	            if (!st[0].has_foldover_edge) {
+	                st[0].has_sep_dir = compute_cycle_separating_direction(
+	                    v, cycles[0], cell_by_index, dt, 0, st[0].sep_dir);
+	            }
+	            if (!st[1].has_foldover_edge) {
+	                st[1].has_sep_dir = compute_cycle_separating_direction(
+	                    v, cycles[1], cell_by_index, dt, 1, st[1].sep_dir);
+	            }
 
-		                // Candidate: move cycle0 along its separation direction
-		                if (has_sep0) {
-		                    std::vector<Point> cand = baseline_positions;
-		                    cand[0] = move_in_dir(sep_dir0, r0);
-		                    consider_positions("sep_dir0", std::move(cand));
-		                }
+	            // Keep the same per-cycle radius convention as existing sep-dir candidates.
+	            const double r0 = std::sqrt(squared_distance(center, vpos0));
+	            const double r1 = std::sqrt(squared_distance(center, vpos1));
 
-		                // Candidate: move cycle1 along its separation direction
-		                if (has_sep1) {
-		                    std::vector<Point> cand = baseline_positions;
-		                    cand[1] = move_in_dir(sep_dir1, r1);
-		                    consider_positions("sep_dir1", std::move(cand));
-		                }
-		            }
-		        };
+	            auto move_in_dir = [&center](const float dir[3], double r) -> Point {
+	                return Point(center.x() + r * dir[0], center.y() + r * dir[1], center.z() + r * dir[2]);
+	            };
+	            auto move_in_vec = [&center](const Vector3& dir, double r) -> Point {
+	                return Point(center.x() + r * dir.x(), center.y() + r * dir.y(), center.z() + r * dir.z());
+	            };
+
+	            const int fold_count =
+	                static_cast<int>(st[0].has_foldover_edge) + static_cast<int>(st[1].has_foldover_edge);
+
+	            if (trace) {
+	                DEBUG_PRINT("[DEL-SELFI-A2] v=" << v->info().index
+	                            << " sep_dir_precheck: "
+	                            << "c0 foldover=" << (st[0].has_foldover_edge ? "yes" : "no")
+	                            << " candidates_ge4=" << fold_candidates0
+	                            << " has_sep_dir=" << (st[0].has_sep_dir ? "yes" : "no")
+	                            << " | c1 foldover=" << (st[1].has_foldover_edge ? "yes" : "no")
+	                            << " candidates_ge4=" << fold_candidates1
+	                            << " has_sep_dir=" << (st[1].has_sep_dir ? "yes" : "no")
+	                            << " | fold_count=" << fold_count);
+	            }
+
+	            if (fold_count == 2) {
+	                // Both cycles have foldover edges: move both along their own shared-edge directions.
+	                std::vector<Point> cand = baseline_positions;
+	                cand[0] = move_in_vec(st[0].foldover.unit_dir, r0);
+	                cand[1] = move_in_vec(st[1].foldover.unit_dir, r1);
+	                consider_positions("foldover_both_edges", std::move(cand));
+	                return;
+	            }
+
+	            if (fold_count == 1) {
+	                // Exactly one foldover cycle: keep it at DelV center, move the other by sep-dir.
+	                const int fold_idx = st[0].has_foldover_edge ? 0 : 1;
+	                const int other_idx = 1 - fold_idx;
+	                if (st[other_idx].has_sep_dir) {
+	                    std::vector<Point> cand = baseline_positions;
+	                    cand[static_cast<size_t>(fold_idx)] = center;
+	                    const double r = (other_idx == 0) ? r0 : r1;
+	                    cand[static_cast<size_t>(other_idx)] = move_in_dir(st[other_idx].sep_dir, r);
+	                    consider_positions("foldover_one_keep_center_sep_other", std::move(cand));
+	                }
+	                return;
+	            }
+
+	            // No crossover edges detected: standard sep-dir candidates.
+	            if (st[0].has_sep_dir) {
+	                std::vector<Point> cand = baseline_positions;
+	                cand[0] = move_in_dir(st[0].sep_dir, r0);
+	                consider_positions("sep_dir0", std::move(cand));
+	            }
+	            if (st[1].has_sep_dir) {
+	                std::vector<Point> cand = baseline_positions;
+	                cand[1] = move_in_dir(st[1].sep_dir, r1);
+	                consider_positions("sep_dir1", std::move(cand));
+	            }
+	        };
 
         // ====================================================================
         // Candidate generation
@@ -3479,47 +3717,138 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                     // this vertex has no local Stage-2 self-intersection.
                     vdc_debug::maybe_dump_selfi_cycle_metadata(dt, vit, cell_by_index);
                 }
-                for (size_t c = 0; c < cycles.size(); ++c) {
-                    // Also dump per-cycle facet normal orientation diagnostics used by
-                    // the separation-direction routine for offline debugging.
+                struct InitialCycleDirPlan {
+                    bool has_foldover_edge = false;
+                    CycleFoldoverEdgeInfo foldover;
+                    bool has_sep_dir = false;
                     float sep_dir[3] = {0.0f, 0.0f, 0.0f};
-                    const bool has_sep_dir = compute_cycle_separating_direction(
-                        vit, cycles[c], cell_by_index, dt, static_cast<int>(c), sep_dir);
-
                     double maxdist = std::numeric_limits<double>::infinity();
+                    double cap_radius = 0.0;
+                    Point projected = Point(0.0, 0.0, 0.0);
+                };
+
+                std::vector<InitialCycleDirPlan> plans(cycles.size());
+                auto project_from_center_vec = [&cube_center](const Vector3& dir, double r) -> Point {
+                    return Point(
+                        cube_center.x() + r * dir.x(),
+                        cube_center.y() + r * dir.y(),
+                        cube_center.z() + r * dir.z());
+                };
+
+                for (size_t c = 0; c < cycles.size(); ++c) {
+                    InitialCycleDirPlan& plan = plans[c];
+                    plan.projected = cube_center;
+
                     if (move_cap) {
-                        maxdist = compute_cycle_maxdist_to_opposite_face_planes(
+                        plan.maxdist = compute_cycle_maxdist_to_opposite_face_planes(
                             dt, cell_by_index, vit, static_cast<int>(c),
                             /*require_tprime_crosses_isov=*/move_cap_strict);
                     }
-                    const double cap_radius =
-                        (move_cap && std::isfinite(maxdist) ? std::min(sphere_radius, 0.5 * maxdist)
-                                                            : sphere_radius);
+                    plan.cap_radius =
+                        (move_cap && std::isfinite(plan.maxdist)
+                            ? std::min(sphere_radius, 0.5 * plan.maxdist)
+                            : sphere_radius);
+
+                    int fold_candidates = 0;
+                    plan.foldover = detect_cycle_crossover_edge_direction(
+                        vit, cycles[c], cell_by_index, dt, &fold_candidates);
+                    plan.has_foldover_edge = plan.foldover.found;
+
+                    // Requested logic (2-cycle case): if this cycle has a 4-facet shared edge,
+                    // skip sep-dir computation for that cycle and handle placement after both
+                    // cycles are classified.
+                    const bool skip_sep_dir_for_foldover =
+                        (cycles.size() == 2 && plan.has_foldover_edge);
+                    if (!skip_sep_dir_for_foldover) {
+                        plan.has_sep_dir = compute_cycle_separating_direction(
+                            vit, cycles[c], cell_by_index, dt, static_cast<int>(c), plan.sep_dir);
+                    }
 
                     if (trace_cap) {
                         DEBUG_PRINT("[DEL-MOVE-CAP] v=" << vit->info().index
                                     << " cycle=" << c
                                     << " r1=" << sphere_radius
-                                    << " maxdist=" << maxdist
-                                    << " cap_r=" << cap_radius
-                                    << " has_sep_dir=" << (has_sep_dir ? "yes" : "no")
+                                    << " maxdist=" << plan.maxdist
+                                    << " cap_r=" << plan.cap_radius
+                                    << " foldover_candidates_ge4=" << fold_candidates
+                                    << " foldover_edge=" << (plan.has_foldover_edge ? "yes" : "no")
+                                    << " has_sep_dir=" << (plan.has_sep_dir ? "yes" : "no")
+                                    << (skip_sep_dir_for_foldover ? " (skipped_by_foldover)" : "")
                                     << (move_cap ? (move_cap_strict ? " (strict)" : " (relax)") : " (disabled)"));
                     }
+                }
 
-                    Point projected = cube_center;
-                    if (has_sep_dir) {
-                        projected = Point(
-                            cube_center.x() + cap_radius * static_cast<double>(sep_dir[0]),
-                            cube_center.y() + cap_radius * static_cast<double>(sep_dir[1]),
-                            cube_center.z() + cap_radius * static_cast<double>(sep_dir[2]));
-                    } else if (trace_cap) {
+                if (cycles.size() == 2) {
+                    const bool f0 = plans[0].has_foldover_edge;
+                    const bool f1 = plans[1].has_foldover_edge;
+                    const int fold_count = static_cast<int>(f0) + static_cast<int>(f1);
+
+                    if (fold_count == 2) {
+                        // Both cycles have foldover edges: move each cycle along its own foldover edge.
+                        plans[0].projected = project_from_center_vec(
+                            plans[0].foldover.unit_dir, plans[0].cap_radius);
+                        plans[1].projected = project_from_center_vec(
+                            plans[1].foldover.unit_dir, plans[1].cap_radius);
+                    } else if (fold_count == 1) {
+                        // Exactly one foldover cycle: keep it on DelV center, move the other by sep-dir.
+                        const int fold_idx = f0 ? 0 : 1;
+                        const int other_idx = 1 - fold_idx;
+                        plans[fold_idx].projected = cube_center;
+                        if (plans[other_idx].has_sep_dir) {
+                            plans[other_idx].projected = Point(
+                                cube_center.x() + plans[other_idx].cap_radius *
+                                                    static_cast<double>(plans[other_idx].sep_dir[0]),
+                                cube_center.y() + plans[other_idx].cap_radius *
+                                                    static_cast<double>(plans[other_idx].sep_dir[1]),
+                                cube_center.z() + plans[other_idx].cap_radius *
+                                                    static_cast<double>(plans[other_idx].sep_dir[2]));
+                        }
+                    } else {
+                        // No foldover edges detected: standard sep-dir placement.
+                        for (int c = 0; c < 2; ++c) {
+                            if (!plans[static_cast<size_t>(c)].has_sep_dir) {
+                                continue;
+                            }
+                            plans[static_cast<size_t>(c)].projected = Point(
+                                cube_center.x() + plans[static_cast<size_t>(c)].cap_radius *
+                                                    static_cast<double>(plans[static_cast<size_t>(c)].sep_dir[0]),
+                                cube_center.y() + plans[static_cast<size_t>(c)].cap_radius *
+                                                    static_cast<double>(plans[static_cast<size_t>(c)].sep_dir[1]),
+                                cube_center.z() + plans[static_cast<size_t>(c)].cap_radius *
+                                                    static_cast<double>(plans[static_cast<size_t>(c)].sep_dir[2]));
+                        }
+                    }
+
+                    if (trace_cap) {
+                        DEBUG_PRINT("[DEL-MOVE-CAP] v=" << vit->info().index
+                                    << " two-cycle placement: fold_count=" << fold_count
+                                    << " f0=" << (f0 ? "1" : "0")
+                                    << " f1=" << (f1 ? "1" : "0"));
+                    }
+                } else {
+                    // Existing behavior for >=3 cycles.
+                    for (size_t c = 0; c < cycles.size(); ++c) {
+                        if (!plans[c].has_sep_dir) {
+                            continue;
+                        }
+                        plans[c].projected = Point(
+                            cube_center.x() + plans[c].cap_radius * static_cast<double>(plans[c].sep_dir[0]),
+                            cube_center.y() + plans[c].cap_radius * static_cast<double>(plans[c].sep_dir[1]),
+                            cube_center.z() + plans[c].cap_radius * static_cast<double>(plans[c].sep_dir[2]));
+                    }
+                }
+
+                for (size_t c = 0; c < cycles.size(); ++c) {
+                    if (!plans[c].has_sep_dir &&
+                        squared_distance(plans[c].projected, cube_center) <= 1e-24 &&
+                        trace_cap) {
                         DEBUG_PRINT("[DEL-MOVE-CAP] v=" << vit->info().index
                                     << " cycle=" << c
                                     << " no separating direction; fallback to DelV center");
                     }
                     (void)apply_dihedral_orientation_gate_to_cycle_position(
-                        dt, cell_by_index, vit, static_cast<int>(c), projected);
-                    isovertices[c] = projected;
+                        dt, cell_by_index, vit, static_cast<int>(c), plans[c].projected);
+                    isovertices[c] = plans[c].projected;
                 }
             }
             multi_cycle_vertices.push_back(vit);
