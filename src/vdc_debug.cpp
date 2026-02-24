@@ -895,13 +895,23 @@ void write_delv_off(
     const std::string& filename,
     bool has_bbox,
     const double* bbox_min,
-    const double* bbox_max
+    const double* bbox_max,
+    const std::array<double, 3>& vertex_scale
 ) {
+    auto scaled_coords = [&](const Point& p) -> std::array<double, 3> {
+        return {
+            p.x() * vertex_scale[0],
+            p.y() * vertex_scale[1],
+            p.z() * vertex_scale[2]
+        };
+    };
+
     auto in_bbox = [&](const Point& p) -> bool {
         if (!has_bbox || !bbox_min || !bbox_max) return true;
-        return p.x() >= bbox_min[0] && p.x() <= bbox_max[0] &&
-               p.y() >= bbox_min[1] && p.y() <= bbox_max[1] &&
-               p.z() >= bbox_min[2] && p.z() <= bbox_max[2];
+        const auto scaled = scaled_coords(p);
+        return scaled[0] >= bbox_min[0] && scaled[0] <= bbox_max[0] &&
+               scaled[1] >= bbox_min[1] && scaled[1] <= bbox_max[1] &&
+               scaled[2] >= bbox_min[2] && scaled[2] <= bbox_max[2];
     };
 
     std::unordered_map<Vertex_handle, int> vertex_index;
@@ -951,7 +961,8 @@ void write_delv_off(
     out << vertices.size() << " " << facets.size() << " 0\n";
     out << std::setprecision(17);
     for (const auto& p : vertices) {
-        out << p.x() << " " << p.y() << " " << p.z() << "\n";
+        const auto scaled = scaled_coords(p);
+        out << scaled[0] << " " << scaled[1] << " " << scaled[2] << "\n";
     }
     for (const auto& f : facets) {
         out << "3 " << f[0] << " " << f[1] << " " << f[2] << "\n";
@@ -2328,6 +2339,344 @@ void finalize_multi_isov_trace(
     }
     std::cerr << "[DEL-SELFI-TRACE] Final unresolved vertices: "
               << final_unresolved.size() << "\n";
+}
+
+// -------------------------------------------------------------------------
+// Move-cap trace functions (moved from vdc_del_cycles.cpp)
+// -------------------------------------------------------------------------
+
+static int find_vertex_index_in_cell_debug(const Cell_handle& cell, const Vertex_handle& vertex) {
+    for (int i = 0; i < 4; ++i) {
+        if (cell->vertex(i) == vertex) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void fill_move_cap_trace_tet_geometry(
+    const Delaunay& dt,
+    const Cell_handle& Delta,
+    int t_facet_idx,
+    Vertex_handle w0,
+    MoveCapTraceCandidate* out
+) {
+    if (out == nullptr) {
+        return;
+    }
+    out->has_tet_geometry = false;
+    if (Delta == Cell_handle() || dt.is_infinite(Delta)) {
+        return;
+    }
+    if (t_facet_idx < 0 || t_facet_idx >= 4) {
+        return;
+    }
+    if (w0 == Vertex_handle() || dt.is_infinite(w0) || w0->info().is_dummy) {
+        return;
+    }
+
+    const int w0_local = find_vertex_index_in_cell_debug(Delta, w0);
+    if (w0_local < 0 || w0_local >= 4 || w0_local == t_facet_idx) {
+        return;
+    }
+
+    Vertex_handle w1 = Vertex_handle();
+    Vertex_handle w2 = Vertex_handle();
+    int other_count = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (i == t_facet_idx || i == w0_local) {
+            continue;
+        }
+        if (other_count == 0) {
+            w1 = Delta->vertex(i);
+            ++other_count;
+        } else if (other_count == 1) {
+            w2 = Delta->vertex(i);
+            ++other_count;
+        }
+    }
+    if (other_count != 2) {
+        return;
+    }
+    Vertex_handle w3 = Delta->vertex(t_facet_idx);
+
+    auto is_valid_vertex = [&](Vertex_handle vh) -> bool {
+        return vh != Vertex_handle() && !dt.is_infinite(vh) && !vh->info().is_dummy;
+    };
+    if (!is_valid_vertex(w0) || !is_valid_vertex(w1) || !is_valid_vertex(w2) || !is_valid_vertex(w3)) {
+        return;
+    }
+
+    out->has_tet_geometry = true;
+    out->tet_vertex_indices = {
+        w0->info().index,
+        w1->info().index,
+        w2->info().index,
+        w3->info().index};
+    out->tet_points = {
+        w0->point(),
+        w1->point(),
+        w2->point(),
+        w3->point()};
+}
+
+MoveCapTraceWriteResult write_move_cap_trace_file(
+    Vertex_handle v,
+    int cycle_idx,
+    bool strict_enabled,
+    bool directional_gate_enabled,
+    const Vector3* move_dir,
+    double direction_gate_eps,
+    double maxdist,
+    int acute_dihedral_constraints,
+    int strict_preserve_hits,
+    int strict_preserve_rejects,
+    int direction_keep,
+    int direction_skip,
+    const std::vector<MoveCapTraceCandidate>& candidates,
+    const std::string& trace_dir
+) {
+    MoveCapTraceWriteResult result;
+    result.candidates = static_cast<int>(candidates.size());
+    for (const auto& row : candidates) {
+        if (row.flag_preserve_orientation == 1) {
+            ++result.preserve_true;
+        }
+    }
+
+    if (v == Vertex_handle() || trace_dir.empty()) {
+        return result;
+    }
+
+    std::error_code ec;
+    std::filesystem::path out_dir(trace_dir);
+    std::filesystem::create_directories(out_dir, ec);
+    if (ec) {
+        return result;
+    }
+
+    const int vertex_index = v->info().index;
+    result.path =
+        out_dir / ("move_cap_v" + std::to_string(vertex_index) + "_c" + std::to_string(cycle_idx) + ".txt");
+    std::ofstream out(result.path);
+    if (!out) {
+        result.path.clear();
+        return result;
+    }
+
+    out << std::setprecision(17);
+    out << "vertex_index " << vertex_index << "\n";
+    out << "cycle_index " << cycle_idx << "\n";
+    out << "strict_mode " << (strict_enabled ? 1 : 0) << "\n";
+    out << "directional_gate_enabled " << (directional_gate_enabled ? 1 : 0) << "\n";
+    out << "direction_gate_eps " << direction_gate_eps << "\n";
+    if (move_dir != nullptr) {
+        out << "dir " << move_dir->x() << " " << move_dir->y() << " " << move_dir->z() << "\n";
+    } else {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        out << "dir " << nan << " " << nan << " " << nan << "\n";
+    }
+    out << "candidate_count " << candidates.size() << "\n";
+    out << "acute_dihedral_constraints " << acute_dihedral_constraints << "\n";
+    out << "strict_keep " << strict_preserve_hits << "\n";
+    out << "strict_skip " << strict_preserve_rejects << "\n";
+    out << "direction_keep " << direction_keep << "\n";
+    out << "direction_skip " << direction_skip << "\n";
+    out << "maxdist " << maxdist << "\n";
+    out << "records:\n";
+
+    auto write_point = [&out](const Point& p) {
+        out << "(" << p.x() << "," << p.y() << "," << p.z() << ")";
+    };
+
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const MoveCapTraceCandidate& row = candidates[i];
+        out << "candidate idx=" << i
+            << " src_cell=" << row.source_cell_index
+            << " src_fi=" << row.source_facet_index
+            << " incident_slot=" << row.incident_slot
+            << " delta_cell=" << row.delta_cell_index
+            << " t_fi=" << row.t_facet_idx
+            << " tprime_fi=" << row.tprime_facet_idx
+            << " v_local=" << row.v_local
+            << " acute=" << (row.acute_dihedral ? 1 : 0)
+            << " dot_nt_ntp=" << row.dot_nt_ntp
+            << " strict_mode=" << (row.strict_mode ? 1 : 0)
+            << " flag_preserve_orientation=" << row.flag_preserve_orientation
+            << " dot_dir_ntp_away=" << row.dot_dir_ntp_away
+            << " direction_pass=" << row.direction_pass
+            << " accepted_for_bound=" << (row.accepted_for_bound ? 1 : 0)
+            << " reason=" << row.reason
+            << " dist=" << row.dist
+            << " has_tet=" << (row.has_tet_geometry ? 1 : 0)
+            << " w0_vid=" << row.tet_vertex_indices[0]
+            << " w1_vid=" << row.tet_vertex_indices[1]
+            << " w2_vid=" << row.tet_vertex_indices[2]
+            << " w3_vid=" << row.tet_vertex_indices[3]
+            << " w0=";
+        write_point(row.tet_points[0]);
+        out << " w1=";
+        write_point(row.tet_points[1]);
+        out << " w2=";
+        write_point(row.tet_points[2]);
+        out << " w3=";
+        write_point(row.tet_points[3]);
+        out << "\n";
+    }
+
+    result.wrote = true;
+    return result;
+}
+
+// -------------------------------------------------------------------------
+// Sep-dir normals trace (moved from compute_cycle_separating_direction)
+// -------------------------------------------------------------------------
+
+void dump_sep_dir_normals_trace(
+    const std::string& trace_dir,
+    const SepDirDumpContext& ctx,
+    const std::vector<FacetNormalDumpEntry>& dump_entries
+) {
+    if (trace_dir.empty()) {
+        return;
+    }
+
+    auto sign_label = [](int s) -> const char* {
+        if (s > 0) return "POS";
+        if (s < 0) return "NEG";
+        return "INF";
+    };
+    std::error_code ec;
+    std::filesystem::path out_dir(trace_dir);
+    std::filesystem::create_directories(out_dir, ec);
+
+    const int vidx = ctx.v0->info().index;
+    const std::filesystem::path path =
+        out_dir / ("sep_dir_v" + std::to_string(vidx) + "_c" + std::to_string(ctx.cycle_index) + ".txt");
+
+    std::ofstream out(path);
+    if (!out) {
+        return;
+    }
+
+    out << std::setprecision(17);
+    const Point center = ctx.v0->point();
+    out << "vertex_index " << vidx << "\n";
+    out << "cycle_index " << ctx.cycle_index << "\n";
+    out << "center " << center.x() << " " << center.y() << " " << center.z() << "\n";
+    out << "cycle_facets_total " << ctx.cycle_facets_size << "\n";
+    out << "normals_used " << ctx.normals_used << "\n";
+    out << "circumcenter_across_count " << ctx.circumcenter_across_count << "\n";
+    out << "normals_point_to_pos_count " << ctx.normals_point_to_pos_count << "\n";
+    out << "normals_point_to_neg_count " << ctx.normals_point_to_neg_count << "\n";
+    out << "flip_normals_due_to_separation_matrix "
+        << (ctx.flip_normals_for_cycle ? 1 : 0) << "\n";
+    out << "num_cycles " << ctx.num_cycles << "\n";
+    if (ctx.cycle_index >= 0 && ctx.cycle_index < ctx.num_cycles &&
+        ctx.is_separated != nullptr && !ctx.is_separated->empty()) {
+        out << "is_separated_row";
+        for (int j = 0; j < ctx.num_cycles; ++j) {
+            out << " " << static_cast<int>(
+                (*ctx.is_separated)[static_cast<size_t>(ctx.cycle_index)][static_cast<size_t>(j)]);
+        }
+        out << "\n";
+        out << "flip_fail_targets";
+        if (ctx.separation_fail_targets == nullptr || ctx.separation_fail_targets->empty()) {
+            out << " none";
+        } else {
+            for (int j : *ctx.separation_fail_targets) {
+                out << " " << j;
+            }
+        }
+        out << "\n";
+
+        out << "is_separated_matrix:\n";
+        for (int i = 0; i < ctx.num_cycles; ++i) {
+            out << "  row" << i << ":";
+            for (int j = 0; j < ctx.num_cycles; ++j) {
+                out << " " << static_cast<int>(
+                    (*ctx.is_separated)[static_cast<size_t>(i)][static_cast<size_t>(j)]);
+            }
+            out << "\n";
+        }
+    }
+    out << "min_sphere_center " << ctx.cx << " " << ctx.cy << " " << ctx.cz << "\n";
+    out << "min_sphere_center_len " << ctx.center_len << "\n";
+    out << "eps_no_direction " << 1e-6 << "\n\n";
+    out << "foldover_edge_candidates_ge4 " << ctx.foldover_edge_candidates_ge4 << "\n";
+    out << "foldover_edge_selected";
+    if (ctx.crossover_found) {
+        out << " " << ctx.crossover_v_low
+            << " " << ctx.crossover_v_high
+            << " count=" << ctx.crossover_count
+            << " incident_on_v0=" << (ctx.crossover_incident_on_v0 ? 1 : 0)
+            << " other_vidx=" << ctx.crossover_other_vidx
+            << " dir=(" << ctx.crossover_dir_x
+            << "," << ctx.crossover_dir_y
+            << "," << ctx.crossover_dir_z << ")";
+    } else {
+        out << " none";
+    }
+    out << "\n";
+    out << "foldover_fallback_used 0\n\n";
+
+    // Aggregate statistics about the normal distribution.
+    if (ctx.normals_as_points != nullptr) {
+        double sx = 0.0, sy = 0.0, sz = 0.0;
+        for (const auto& n : *ctx.normals_as_points) {
+            sx += n.x();
+            sy += n.y();
+            sz += n.z();
+        }
+        const double sum_len = std::sqrt(sx * sx + sy * sy + sz * sz);
+        out << "sum_normals " << sx << " " << sy << " " << sz << "\n";
+        out << "sum_normals_len " << sum_len << "\n";
+
+        double min_pair_dot = 1.0;
+        double max_pair_dot = -1.0;
+        for (size_t i = 0; i < ctx.normals_as_points->size(); ++i) {
+            for (size_t j = i + 1; j < ctx.normals_as_points->size(); ++j) {
+                const auto& ni = (*ctx.normals_as_points)[i];
+                const auto& nj = (*ctx.normals_as_points)[j];
+                const double d = ni.x() * nj.x() + ni.y() * nj.y() + ni.z() * nj.z();
+                min_pair_dot = std::min(min_pair_dot, d);
+                max_pair_dot = std::max(max_pair_dot, d);
+            }
+        }
+        out << "min_pair_dot " << min_pair_dot << "\n";
+        out << "max_pair_dot " << max_pair_dot << "\n\n";
+    }
+
+    out << "facet_normals:\n";
+    for (const auto& e : dump_entries) {
+        out << "facet cell=" << e.cell_index << " fi=" << e.facet_index
+            << " cell_sign=" << sign_label(e.cell_sign)
+            << " vids=(" << e.facet_vidx[0] << "," << e.facet_vidx[1] << "," << e.facet_vidx[2] << ")"
+            << " p0=(" << e.facet_p[0].x() << "," << e.facet_p[0].y() << "," << e.facet_p[0].z() << ")"
+            << " p1=(" << e.facet_p[1].x() << "," << e.facet_p[1].y() << "," << e.facet_p[1].z() << ")"
+            << " p2=(" << e.facet_p[2].x() << "," << e.facet_p[2].y() << "," << e.facet_p[2].z() << ")"
+            << " opp=" << e.opposite_vidx
+            << " opp_p=(" << e.opposite_p.x() << "," << e.opposite_p.y() << "," << e.opposite_p.z() << ")"
+            << " n=(" << e.nx << "," << e.ny << "," << e.nz << ")"
+            << " dot_to_opp=" << e.dot_to_opposite
+            << " dot_to_circ=" << e.dot_to_circumcenter
+            << " normal_flip_applied=" << (e.normal_flip_applied ? 1 : 0)
+            << " normal_points_to_cell="
+            << (e.normal_points_to_cell_index >= 0
+                ? std::to_string(e.normal_points_to_cell_index)
+                : std::string("INF"))
+            << " normal_points_to_sign=" << sign_label(e.normal_points_to_sign)
+            << " normal_points_away_tet="
+            << (e.normal_points_away_cell_index >= 0
+                ? std::to_string(e.normal_points_away_cell_index)
+                : std::string("INF"))
+            << " normal_points_away_sign=" << sign_label(e.normal_points_away_sign)
+            << " nbr_cell="
+            << (e.neighbor_cell_index >= 0 ? std::to_string(e.neighbor_cell_index) : std::string("INF"))
+            << " nbr_fi=" << e.neighbor_facet_index
+            << " nbr_sign=" << sign_label(e.neighbor_sign)
+            << "\n";
+    }
 }
 
 } // namespace vdc_debug

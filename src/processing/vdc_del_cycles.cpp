@@ -1299,27 +1299,6 @@ bool check_self_intersection(
     const bool trace_details = vdc_debug::trace_selfi_enabled(v_idx) && vdc_debug::trace_selfi_intersection_details_enabled();
     const bool log_within = vdc_debug::log_selfi_within_cycle_vertices();
 
-    auto kind_name = [](TriIntersectionKind k) -> const char* {
-        switch (k) {
-            case TriIntersectionKind::NONE: return "NONE";
-            case TriIntersectionKind::DISJOINT_TRIANGLE_TRIANGLE: return "DISJOINT_TRIANGLE_TRIANGLE";
-            case TriIntersectionKind::SHARED_VERTEX_T1_OPPOSITE_SEGMENT: return "SHARED_VERTEX_T1_OPPOSITE_SEGMENT";
-            case TriIntersectionKind::SHARED_VERTEX_T2_OPPOSITE_SEGMENT: return "SHARED_VERTEX_T2_OPPOSITE_SEGMENT";
-            case TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T1_0: return "SHARED_VERTEX_INTERIOR_SEGMENT_T1_0";
-            case TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T1_1: return "SHARED_VERTEX_INTERIOR_SEGMENT_T1_1";
-            case TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T2_0: return "SHARED_VERTEX_INTERIOR_SEGMENT_T2_0";
-            case TriIntersectionKind::SHARED_VERTEX_INTERIOR_SEGMENT_T2_1: return "SHARED_VERTEX_INTERIOR_SEGMENT_T2_1";
-            default: return "UNKNOWN";
-        }
-    };
-
-    auto dump_tri_pair = [&](const Triangle_3& a, const Triangle_3& b) {
-        DEBUG_PRINT("[DEL-SELFI-INT]   t1=("
-                    << a.vertex(0) << ", " << a.vertex(1) << ", " << a.vertex(2) << ")");
-        DEBUG_PRINT("[DEL-SELFI-INT]   t2=("
-                    << b.vertex(0) << ", " << b.vertex(1) << ", " << b.vertex(2) << ")");
-    };
-
     const auto& cycles = v->info().facet_cycles;
     size_t num_cycles = cycles.size();
 
@@ -1609,35 +1588,245 @@ static bool compute_unit_normal_toward_cell(
     return true;
 }
 
-static double compute_cycle_maxdist_to_opposite_face_planes(
+using IsosurfaceEdgeSet = std::unordered_set<EdgeKey, EdgeKeyHash>;
+
+struct StrictTetPreservationContext {
+    bool strict_mode = false;
+    const IsosurfaceEdgeSet* isosurface_edges = nullptr;
+};
+
+struct CycleMoveCapBound {
+    double maxdist = std::numeric_limits<double>::infinity();
+    int acute_dihedral_constraints = 0;
+    int strict_preserve_hits = 0;
+    int strict_preserve_rejects = 0;
+    int direction_keep = 0;
+    int direction_skip = 0;
+};
+
+// MoveCapTraceCandidate, MoveCapTraceWriteResult, fill_move_cap_trace_tet_geometry,
+// and write_move_cap_trace_file are now in vdc_debug.h / vdc_debug.cpp.
+using vdc_debug::MoveCapTraceCandidate;
+using vdc_debug::MoveCapTraceWriteResult;
+using vdc_debug::fill_move_cap_trace_tet_geometry;
+using vdc_debug::write_move_cap_trace_file;
+
+static bool strict_tet_preservation_enabled(const StrictTetPreservationContext& context) {
+    return context.strict_mode && context.isosurface_edges != nullptr;
+}
+
+static IsosurfaceEdgeSet build_isosurface_edge_membership_set(const Delaunay& dt) {
+    IsosurfaceEdgeSet edges;
+    edges.reserve(static_cast<size_t>(std::max<int64_t>(64, dt.number_of_finite_cells() * 3)));
+
+    auto add_edge = [&](Vertex_handle a, Vertex_handle b) {
+        if (a == Vertex_handle() || b == Vertex_handle()) {
+            return;
+        }
+        if (dt.is_infinite(a) || dt.is_infinite(b)) {
+            return;
+        }
+        if (!a->info().active || !b->info().active) {
+            return;
+        }
+        if (a->info().is_dummy || b->info().is_dummy) {
+            return;
+        }
+        edges.insert(EdgeKey::FromVertexIndices(a->info().index, b->info().index));
+    };
+
+    for (auto ch = dt.finite_cells_begin(); ch != dt.finite_cells_end(); ++ch) {
+        for (int facet_idx = 0; facet_idx < 4; ++facet_idx) {
+            if (!ch->info().facet_is_isosurface[facet_idx]) {
+                continue;
+            }
+            Vertex_handle f0 = ch->vertex((facet_idx + 1) % 4);
+            Vertex_handle f1 = ch->vertex((facet_idx + 2) % 4);
+            Vertex_handle f2 = ch->vertex((facet_idx + 3) % 4);
+            add_edge(f0, f1);
+            add_edge(f1, f2);
+            add_edge(f2, f0);
+        }
+    }
+
+    return edges;
+}
+
+static bool is_isosurface_edge_member(
+    const Delaunay& dt,
+    const IsosurfaceEdgeSet& isosurface_edges,
+    const Vertex_handle& a,
+    const Vertex_handle& b
+) {
+    if (a == Vertex_handle() || b == Vertex_handle()) {
+        return false;
+    }
+    if (dt.is_infinite(a) || dt.is_infinite(b)) {
+        return false;
+    }
+    if (a->info().is_dummy || b->info().is_dummy) {
+        return false;
+    }
+    return isosurface_edges.find(
+               EdgeKey::FromVertexIndices(a->info().index, b->info().index)) !=
+           isosurface_edges.end();
+}
+
+static bool strict_preserve_tet_orientation_for_cycle_facet(
+    const Delaunay& dt,
+    const Cell_handle& Delta,
+    int t_facet_idx,
+    Vertex_handle w0,
+    const IsosurfaceEdgeSet& isosurface_edges
+) {
+    if (Delta == Cell_handle() || dt.is_infinite(Delta)) {
+        return false;
+    }
+    if (t_facet_idx < 0 || t_facet_idx >= 4) {
+        return false;
+    }
+    if (w0 == Vertex_handle() || dt.is_infinite(w0) || w0->info().is_dummy) {
+        return false;
+    }
+
+    const int w0_local = find_vertex_index_in_cell(Delta, w0);
+    if (w0_local < 0 || w0_local >= 4 || w0_local == t_facet_idx) {
+        return false;
+    }
+
+    auto edge_dihedral_is_ge_90 = [&](int edge_a_local, int edge_b_local) -> bool {
+        int opposite_locals[2] = {-1, -1};
+        int opposite_count = 0;
+        for (int i = 0; i < 4; ++i) {
+            if (i == edge_a_local || i == edge_b_local) {
+                continue;
+            }
+            if (opposite_count < 2) {
+                opposite_locals[opposite_count++] = i;
+            }
+        }
+        if (opposite_count != 2) {
+            return false;
+        }
+
+        Vector3 n0, n1;
+        if (!compute_unit_normal_toward_cell(dt, Delta, opposite_locals[0], &n0)) {
+            return false;
+        }
+        if (!compute_unit_normal_toward_cell(dt, Delta, opposite_locals[1], &n1)) {
+            return false;
+        }
+
+        // Internal dihedral >= 90deg iff dot(inward_normals) >= 0.
+        // Use a tiny tolerance for near-right-angle numerical jitter.
+        constexpr double kDihedralEps = 1e-12;
+        return vec_dot(n0, n1) >= -kDihedralEps;
+    };
+
+    struct OpposingEdgePair {
+        int e0_a;
+        int e0_b;
+        int e1_a;
+        int e1_b;
+    };
+    constexpr OpposingEdgePair kOpposingPairs[3] = {
+        {0, 1, 2, 3},
+        {0, 2, 1, 3},
+        {0, 3, 1, 2}};
+
+    for (const OpposingEdgePair& pair : kOpposingPairs) {
+        Vertex_handle e0_a = Delta->vertex(pair.e0_a);
+        Vertex_handle e0_b = Delta->vertex(pair.e0_b);
+        Vertex_handle e1_a = Delta->vertex(pair.e1_a);
+        Vertex_handle e1_b = Delta->vertex(pair.e1_b);
+        if (e0_a == Vertex_handle() || e0_b == Vertex_handle() ||
+            e1_a == Vertex_handle() || e1_b == Vertex_handle()) {
+            continue;
+        }
+        if (dt.is_infinite(e0_a) || dt.is_infinite(e0_b) ||
+            dt.is_infinite(e1_a) || dt.is_infinite(e1_b)) {
+            continue;
+        }
+        if (e0_a->info().is_dummy || e0_b->info().is_dummy ||
+            e1_a->info().is_dummy || e1_b->info().is_dummy) {
+            continue;
+        }
+
+        if (!is_isosurface_edge_member(dt, isosurface_edges, e0_a, e0_b)) {
+            continue;
+        }
+        if (!is_isosurface_edge_member(dt, isosurface_edges, e1_a, e1_b)) {
+            continue;
+        }
+        if (!edge_dihedral_is_ge_90(pair.e0_a, pair.e0_b)) {
+            continue;
+        }
+        if (!edge_dihedral_is_ge_90(pair.e1_a, pair.e1_b)) {
+            continue;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static CycleMoveCapBound compute_cycle_maxdist_to_opposite_face_planes(
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
     Vertex_handle v,
     int cycle_idx,
-    bool require_tprime_crosses_isov
+    const StrictTetPreservationContext& strict_context,
+    const Vector3* move_dir
 ) {
+    CycleMoveCapBound out;
     if (v == Vertex_handle() || !v->info().active || v->info().is_dummy) {
-        return std::numeric_limits<double>::infinity();
+        return out;
     }
 
     const auto& cycles = v->info().facet_cycles;
     if (cycle_idx < 0 || cycle_idx >= static_cast<int>(cycles.size())) {
-        return std::numeric_limits<double>::infinity();
+        return out;
     }
     const auto& cycle_facets = cycles[static_cast<size_t>(cycle_idx)];
     if (cycle_facets.empty()) {
-        return std::numeric_limits<double>::infinity();
+        return out;
     }
 
     const Point w = v->point(); // Delaunay site position (movement center)
-    double maxdist = std::numeric_limits<double>::infinity();
+    const bool strict_enabled = strict_tet_preservation_enabled(strict_context);
+    constexpr double kDirectionGateEps = 1e-12;
+    const bool directional_gate_enabled = strict_enabled && move_dir != nullptr;
+    const Vector3 dir = (move_dir != nullptr ? *move_dir : Vector3(0.0, 0.0, 0.0));
+    const bool trace = vdc_debug::trace_selfi_enabled(v->info().index);
+    const std::string trace_dir = trace ? vdc_debug::trace_selfi_dump_dir() : std::string();
+    const bool dump_trace = trace && !trace_dir.empty();
+    std::vector<MoveCapTraceCandidate> trace_candidates;
+    if (dump_trace) {
+        trace_candidates.reserve(cycle_facets.size() * 2 + 4);
+    }
 
     for (const auto& [cell_idx, facet_idx_pos] : cycle_facets) {
         Cell_handle cell_pos = lookup_cell(cell_by_index, cell_idx);
         if (cell_pos == Cell_handle() || dt.is_infinite(cell_pos)) {
+            if (dump_trace) {
+                MoveCapTraceCandidate row;
+                row.source_cell_index = cell_idx;
+                row.source_facet_index = facet_idx_pos;
+                row.strict_mode = strict_enabled;
+                row.reason = "source_cell_missing";
+                trace_candidates.push_back(std::move(row));
+            }
             continue;
         }
         if (facet_idx_pos < 0 || facet_idx_pos >= 4) {
+            if (dump_trace) {
+                MoveCapTraceCandidate row;
+                row.source_cell_index = cell_idx;
+                row.source_facet_index = facet_idx_pos;
+                row.strict_mode = strict_enabled;
+                row.reason = "source_facet_invalid";
+                trace_candidates.push_back(std::move(row));
+            }
             continue;
         }
 
@@ -1658,71 +1847,160 @@ static double compute_cycle_maxdist_to_opposite_face_planes(
             incident[1].ch = Cell_handle();
         }
 
-        for (const IncidentCell& ic : incident) {
+        for (int incident_slot = 0; incident_slot < 2; ++incident_slot) {
+            const IncidentCell& ic = incident[incident_slot];
             const Cell_handle Delta = ic.ch;
             const int t_facet_idx = ic.facet_idx;
+            MoveCapTraceCandidate row;
+            row.source_cell_index = cell_idx;
+            row.source_facet_index = facet_idx_pos;
+            row.incident_slot = incident_slot;
+            row.strict_mode = strict_enabled;
+
             if (Delta == Cell_handle()) {
+                if (dump_trace) {
+                    row.reason = "missing_incident_cell";
+                    trace_candidates.push_back(std::move(row));
+                }
                 continue;
             }
+            row.delta_cell_index = Delta->info().index;
             if (t_facet_idx < 0 || t_facet_idx >= 4) {
+                if (dump_trace) {
+                    row.reason = "invalid_t_facet";
+                    trace_candidates.push_back(std::move(row));
+                }
                 continue;
             }
+            row.t_facet_idx = t_facet_idx;
 
             const int v_local = find_vertex_index_in_cell(Delta, v);
+            row.v_local = v_local;
             if (v_local < 0 || v_local >= 4) {
+                if (dump_trace) {
+                    row.reason = "vertex_not_in_tet";
+                    trace_candidates.push_back(std::move(row));
+                }
                 continue;
             }
             if (v_local == t_facet_idx) {
                 // v must be a vertex of facet t.
+                if (dump_trace) {
+                    row.reason = "vertex_opposite_cycle_facet";
+                    trace_candidates.push_back(std::move(row));
+                }
                 continue;
             }
 
             // t' is the face of Δ opposite v.
             const int tprime_facet_idx = v_local;
-
-            // For strict-move-cap diagnostics, record whether t' crosses the isovalue.
-            bool tprime_crosses_isov = false;
-            bool tprime_neigh_pos = false;
-            {
-                Cell_handle tprime_neigh = Delta->neighbor(tprime_facet_idx);
-                if (tprime_neigh != Cell_handle() && !dt.is_infinite(tprime_neigh)) {
-                    tprime_neigh_pos = tprime_neigh->info().flag_positive;
-                    tprime_crosses_isov =
-                        (Delta->info().flag_positive != tprime_neigh_pos);
-                }
-            }
-
-            if (require_tprime_crosses_isov) {
-                const bool crosses_isov =
-                    tprime_crosses_isov;
-                if (!crosses_isov) {
-                    continue;
-                }
-            }
+            row.tprime_facet_idx = tprime_facet_idx;
+            fill_move_cap_trace_tet_geometry(dt, Delta, t_facet_idx, v, &row);
 
             Vector3 nt, ntp;
             if (!compute_unit_normal_toward_cell(dt, Delta, t_facet_idx, &nt)) {
+                if (dump_trace) {
+                    row.reason = "invalid_t_normal";
+                    trace_candidates.push_back(std::move(row));
+                }
                 continue;
             }
             if (!compute_unit_normal_toward_cell(dt, Delta, tprime_facet_idx, &ntp)) {
+                if (dump_trace) {
+                    row.reason = "invalid_tprime_normal";
+                    trace_candidates.push_back(std::move(row));
+                }
                 continue;
             }
 
             // Acute dihedral (< 90°) between the two faces, using consistent (cell-toward) normals.
-            if (vec_dot(nt, ntp) >= 0.0) {
+            const double dot_nt_ntp = vec_dot(nt, ntp);
+            row.dot_nt_ntp = dot_nt_ntp;
+            row.acute_dihedral = (dot_nt_ntp < 0.0);
+            if (!row.acute_dihedral) {
+                if (dump_trace) {
+                    row.reason = "non_acute_dihedral";
+                    trace_candidates.push_back(std::move(row));
+                }
                 continue;
+            }
+            ++out.acute_dihedral_constraints;
+
+            if (strict_enabled) {
+                const bool preserve = strict_preserve_tet_orientation_for_cycle_facet(
+                    dt, Delta, t_facet_idx, v, *strict_context.isosurface_edges);
+                row.flag_preserve_orientation = preserve ? 1 : 0;
+                if (preserve) {
+                    ++out.strict_preserve_hits;
+                } else {
+                    ++out.strict_preserve_rejects;
+                    if (dump_trace) {
+                        row.reason = "strict_reject";
+                        trace_candidates.push_back(std::move(row));
+                    }
+                    continue;
+                }
+            }
+
+            const Vector3 ntp_away = -ntp;
+            if (directional_gate_enabled) {
+                const double dot_dir_ntp_away = vec_dot(dir, ntp_away);
+                row.dot_dir_ntp_away = dot_dir_ntp_away;
+                row.direction_pass = (dot_dir_ntp_away > kDirectionGateEps) ? 1 : 0;
+                if (row.direction_pass == 0) {
+                    ++out.direction_skip;
+                    if (dump_trace) {
+                        row.reason = "direction_gate_reject";
+                        trace_candidates.push_back(std::move(row));
+                    }
+                    continue;
+                }
+                ++out.direction_keep;
             }
 
             // w' is the vertex of t' not shared by t: it is exactly the vertex opposite t in Δ.
             const Point wprime = Delta->vertex(t_facet_idx)->point();
-            const double dist = std::abs(vec_dot(Vector3(w, wprime), ntp));
-            if (dist < maxdist) {
-                maxdist = dist;
+            const double dist = std::abs(vec_dot(Vector3(w, wprime), ntp_away));
+            row.dist = dist;
+            row.accepted_for_bound = true;
+            row.reason = "accepted";
+            if (dump_trace) {
+                trace_candidates.push_back(std::move(row));
+            }
+            if (dist < out.maxdist) {
+                out.maxdist = dist;
             }
         }
     }
 
-    return maxdist;
+    if (dump_trace) {
+        const MoveCapTraceWriteResult trace_write = write_move_cap_trace_file(
+            v,
+            cycle_idx,
+            strict_enabled,
+            directional_gate_enabled,
+            (directional_gate_enabled ? &dir : nullptr),
+            kDirectionGateEps,
+            out.maxdist,
+            out.acute_dihedral_constraints,
+            out.strict_preserve_hits,
+            out.strict_preserve_rejects,
+            out.direction_keep,
+            out.direction_skip,
+            trace_candidates,
+            trace_dir);
+        if (trace_write.wrote) {
+            DEBUG_PRINT("[DEL-MOVE-CAP-TRACE] v=" << v->info().index
+                        << " cycle=" << cycle_idx
+                        << " file=" << trace_write.path.string()
+                        << " candidates=" << trace_write.candidates
+                        << " preserve_true=" << trace_write.preserve_true
+                        << " direction_keep=" << out.direction_keep
+                        << " direction_skip=" << out.direction_skip);
+        }
+    }
+
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1737,7 +2015,8 @@ static bool cycle_move_reverses_acute_dihedral_tet_orientation(
     const std::vector<Cell_handle>& cell_by_index,
     Vertex_handle v,
     int cycle_idx,
-    const Point& moved_position
+    const Point& moved_position,
+    const StrictTetPreservationContext& strict_context
 ) {
     if (v == Vertex_handle() || !v->info().active || v->info().is_dummy) {
         return false;
@@ -1755,6 +2034,7 @@ static bool cycle_move_reverses_acute_dihedral_tet_orientation(
     if (squared_distance(moved_position, center) <= 1e-24) {
         return false;
     }
+    const bool strict_enabled = strict_tet_preservation_enabled(strict_context);
 
     const auto& cycle_facets = cycles[static_cast<size_t>(cycle_idx)];
     for (const auto& [cell_idx, facet_idx_pos] : cycle_facets) {
@@ -1797,15 +2077,22 @@ static bool cycle_move_reverses_acute_dihedral_tet_orientation(
             // t' = face opposite moved vertex v in Delta.
             const int tprime_facet_idx = v_local;
 
-            // Only apply this gate when both faces are isosurface facets.
-            bool tprime_is_isosurface = false;
-            const Cell_handle tprime_neigh = Delta->neighbor(tprime_facet_idx);
-            if (tprime_neigh != Cell_handle() && !dt.is_infinite(tprime_neigh)) {
-                tprime_is_isosurface =
-                    (Delta->info().flag_positive != tprime_neigh->info().flag_positive);
-            }
-            if (!tprime_is_isosurface) {
-                continue;
+            if (strict_enabled) {
+                if (!strict_preserve_tet_orientation_for_cycle_facet(
+                        dt, Delta, t_facet_idx, v, *strict_context.isosurface_edges)) {
+                    continue;
+                }
+            } else {
+                // Legacy relax-mode behavior: only gate on t' faces that cross the isovalue.
+                bool tprime_is_isosurface = false;
+                const Cell_handle tprime_neigh = Delta->neighbor(tprime_facet_idx);
+                if (tprime_neigh != Cell_handle() && !dt.is_infinite(tprime_neigh)) {
+                    tprime_is_isosurface =
+                        (Delta->info().flag_positive != tprime_neigh->info().flag_positive);
+                }
+                if (!tprime_is_isosurface) {
+                    continue;
+                }
             }
 
             Vector3 nt, ntp;
@@ -1844,10 +2131,11 @@ static bool apply_dihedral_orientation_gate_to_cycle_position(
     const std::vector<Cell_handle>& cell_by_index,
     Vertex_handle v,
     int cycle_idx,
-    Point& position
+    Point& position,
+    const StrictTetPreservationContext& strict_context
 ) {
     if (!cycle_move_reverses_acute_dihedral_tet_orientation(
-            dt, cell_by_index, v, cycle_idx, position)) {
+            dt, cell_by_index, v, cycle_idx, position, strict_context)) {
         return false;
     }
     position = v->point();
@@ -1858,7 +2146,8 @@ static int apply_dihedral_orientation_gate_to_positions(
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
     Vertex_handle v,
-    std::vector<Point>& positions
+    std::vector<Point>& positions,
+    const StrictTetPreservationContext& strict_context
 ) {
     if (v == Vertex_handle()) {
         return 0;
@@ -1869,7 +2158,7 @@ static int apply_dihedral_orientation_gate_to_positions(
         static_cast<int>(v->info().facet_cycles.size()));
     for (int c = 0; c < n; ++c) {
         if (apply_dihedral_orientation_gate_to_cycle_position(
-                dt, cell_by_index, v, c, positions[static_cast<size_t>(c)])) {
+                dt, cell_by_index, v, c, positions[static_cast<size_t>(c)], strict_context)) {
             ++clamped;
         }
     }
@@ -2343,28 +2632,8 @@ bool compute_cycle_separating_direction(
     const CycleFoldoverEdgeInfo crossover_edge_dir = detect_cycle_crossover_edge_direction(
         v0, cycle_facets, cell_by_index, dt, &foldover_edge_candidates_ge4);
 
-    struct FacetNormalDumpEntry {
-        int cell_index = -1;
-        int facet_index = -1;
-        int cell_sign = 0; // +1 POS, -1 NEG
-        int neighbor_cell_index = -1; // -1 means infinite neighbor
-        int neighbor_facet_index = -1; // facet index in neighbor cell (if finite)
-        int neighbor_sign = 0; // +1 POS, -1 NEG, 0 INF/unknown
-        int normal_points_to_cell_index = -1; // final normal orientation target side
-        int normal_points_to_sign = 0; // +1 POS, -1 NEG, 0 INF/unknown
-        int normal_points_away_cell_index = -1; // opposite side of final normal orientation
-        int normal_points_away_sign = 0; // +1 POS, -1 NEG, 0 INF/unknown
-        bool normal_flip_applied = false;
-        int facet_vidx[3] = {-1, -1, -1};
-        Point facet_p[3];
-        int opposite_vidx = -1;
-        Point opposite_p;
-        double nx = 0.0;
-        double ny = 0.0;
-        double nz = 0.0;
-        double dot_to_opposite = 0.0;
-        double dot_to_circumcenter = 0.0;
-    };
+    // FacetNormalDumpEntry is now in vdc_debug.h.
+    using vdc_debug::FacetNormalDumpEntry;
 
     std::vector<FacetNormalDumpEntry> dump_entries;
     if (dump_normals) {
@@ -2533,137 +2802,34 @@ bool compute_cycle_separating_direction(
     constexpr double eps = 1e-6;
 
     if (dump_normals) {
-        auto sign_label = [](int s) -> const char* {
-            if (s > 0) return "POS";
-            if (s < 0) return "NEG";
-            return "INF";
-        };
-        std::error_code ec;
-        std::filesystem::path out_dir(trace_dir);
-        std::filesystem::create_directories(out_dir, ec);
-
-        const int vidx = v0->info().index;
-        const std::filesystem::path path =
-            out_dir / ("sep_dir_v" + std::to_string(vidx) + "_c" + std::to_string(cycle_index) + ".txt");
-
-        std::ofstream out(path);
-        if (out) {
-            out << std::setprecision(17);
-            const Point center = v0->point();
-            out << "vertex_index " << vidx << "\n";
-            out << "cycle_index " << cycle_index << "\n";
-            out << "center " << center.x() << " " << center.y() << " " << center.z() << "\n";
-            out << "cycle_facets_total " << cycle_facets.size() << "\n";
-            out << "normals_used " << normals_as_points.size() << "\n";
-            out << "circumcenter_across_count " << circumcenter_across_count << "\n";
-            out << "normals_point_to_pos_count " << normals_point_to_pos_count << "\n";
-            out << "normals_point_to_neg_count " << normals_point_to_neg_count << "\n";
-            out << "flip_normals_due_to_separation_matrix "
-                << (flip_normals_for_cycle ? 1 : 0) << "\n";
-            out << "num_cycles " << num_cycles << "\n";
-            if (cycle_index >= 0 && cycle_index < num_cycles && !is_separated.empty()) {
-                out << "is_separated_row";
-                for (int j = 0; j < num_cycles; ++j) {
-                    out << " " << static_cast<int>(
-                        is_separated[static_cast<size_t>(cycle_index)][static_cast<size_t>(j)]);
-                }
-                out << "\n";
-                out << "flip_fail_targets";
-                if (separation_fail_targets.empty()) {
-                    out << " none";
-                } else {
-                    for (int j : separation_fail_targets) {
-                        out << " " << j;
-                    }
-                }
-                out << "\n";
-
-                out << "is_separated_matrix:\n";
-                for (int i = 0; i < num_cycles; ++i) {
-                    out << "  row" << i << ":";
-                    for (int j = 0; j < num_cycles; ++j) {
-                        out << " " << static_cast<int>(
-                            is_separated[static_cast<size_t>(i)][static_cast<size_t>(j)]);
-                    }
-                    out << "\n";
-                }
-            }
-            out << "min_sphere_center " << cx << " " << cy << " " << cz << "\n";
-            out << "min_sphere_center_len " << center_len << "\n";
-            out << "eps_no_direction " << 1e-6 << "\n\n";
-            out << "foldover_edge_candidates_ge4 " << foldover_edge_candidates_ge4 << "\n";
-            out << "foldover_edge_selected";
-            if (crossover_edge_dir.found) {
-                out << " " << crossover_edge_dir.v_low
-                    << " " << crossover_edge_dir.v_high
-                    << " count=" << crossover_edge_dir.count
-                    << " incident_on_v0=" << (crossover_edge_dir.incident_on_v0 ? 1 : 0)
-                    << " other_vidx=" << crossover_edge_dir.other_vidx
-                    << " dir=(" << crossover_edge_dir.unit_dir.x()
-                    << "," << crossover_edge_dir.unit_dir.y()
-                    << "," << crossover_edge_dir.unit_dir.z() << ")";
-            } else {
-                out << " none";
-            }
-            out << "\n";
-            out << "foldover_fallback_used 0\n\n";
-
-            // Aggregate statistics about the normal distribution.
-            double sx = 0.0, sy = 0.0, sz = 0.0;
-            for (const auto& n : normals_as_points) {
-                sx += n.x();
-                sy += n.y();
-                sz += n.z();
-            }
-            const double sum_len = std::sqrt(sx * sx + sy * sy + sz * sz);
-            out << "sum_normals " << sx << " " << sy << " " << sz << "\n";
-            out << "sum_normals_len " << sum_len << "\n";
-
-            double min_pair_dot = 1.0;
-            double max_pair_dot = -1.0;
-            for (size_t i = 0; i < normals_as_points.size(); ++i) {
-                for (size_t j = i + 1; j < normals_as_points.size(); ++j) {
-                    const double d = normals_as_points[i].x() * normals_as_points[j].x()
-                                   + normals_as_points[i].y() * normals_as_points[j].y()
-                                   + normals_as_points[i].z() * normals_as_points[j].z();
-                    min_pair_dot = std::min(min_pair_dot, d);
-                    max_pair_dot = std::max(max_pair_dot, d);
-                }
-            }
-            out << "min_pair_dot " << min_pair_dot << "\n";
-            out << "max_pair_dot " << max_pair_dot << "\n\n";
-
-            out << "facet_normals:\n";
-            for (const auto& e : dump_entries) {
-                out << "facet cell=" << e.cell_index << " fi=" << e.facet_index
-                    << " cell_sign=" << sign_label(e.cell_sign)
-                    << " vids=(" << e.facet_vidx[0] << "," << e.facet_vidx[1] << "," << e.facet_vidx[2] << ")"
-                    << " p0=(" << e.facet_p[0].x() << "," << e.facet_p[0].y() << "," << e.facet_p[0].z() << ")"
-                    << " p1=(" << e.facet_p[1].x() << "," << e.facet_p[1].y() << "," << e.facet_p[1].z() << ")"
-                    << " p2=(" << e.facet_p[2].x() << "," << e.facet_p[2].y() << "," << e.facet_p[2].z() << ")"
-                    << " opp=" << e.opposite_vidx
-                    << " opp_p=(" << e.opposite_p.x() << "," << e.opposite_p.y() << "," << e.opposite_p.z() << ")"
-                    << " n=(" << e.nx << "," << e.ny << "," << e.nz << ")"
-                    << " dot_to_opp=" << e.dot_to_opposite
-                    << " dot_to_circ=" << e.dot_to_circumcenter
-                    << " normal_flip_applied=" << (e.normal_flip_applied ? 1 : 0)
-                    << " normal_points_to_cell="
-                    << (e.normal_points_to_cell_index >= 0
-                        ? std::to_string(e.normal_points_to_cell_index)
-                        : std::string("INF"))
-                    << " normal_points_to_sign=" << sign_label(e.normal_points_to_sign)
-                    << " normal_points_away_tet="
-                    << (e.normal_points_away_cell_index >= 0
-                        ? std::to_string(e.normal_points_away_cell_index)
-                        : std::string("INF"))
-                    << " normal_points_away_sign=" << sign_label(e.normal_points_away_sign)
-                    << " nbr_cell="
-                    << (e.neighbor_cell_index >= 0 ? std::to_string(e.neighbor_cell_index) : std::string("INF"))
-                    << " nbr_fi=" << e.neighbor_facet_index
-                    << " nbr_sign=" << sign_label(e.neighbor_sign)
-                    << "\n";
-            }
-        }
+        vdc_debug::SepDirDumpContext dump_ctx;
+        dump_ctx.v0 = v0;
+        dump_ctx.cycle_index = cycle_index;
+        dump_ctx.num_cycles = num_cycles;
+        dump_ctx.cycle_facets_size = cycle_facets.size();
+        dump_ctx.normals_used = normals_as_points.size();
+        dump_ctx.circumcenter_across_count = circumcenter_across_count;
+        dump_ctx.normals_point_to_pos_count = normals_point_to_pos_count;
+        dump_ctx.normals_point_to_neg_count = normals_point_to_neg_count;
+        dump_ctx.flip_normals_for_cycle = flip_normals_for_cycle;
+        dump_ctx.is_separated = &is_separated;
+        dump_ctx.separation_fail_targets = &separation_fail_targets;
+        dump_ctx.cx = cx;
+        dump_ctx.cy = cy;
+        dump_ctx.cz = cz;
+        dump_ctx.center_len = center_len;
+        dump_ctx.foldover_edge_candidates_ge4 = foldover_edge_candidates_ge4;
+        dump_ctx.crossover_found = crossover_edge_dir.found;
+        dump_ctx.crossover_v_low = crossover_edge_dir.v_low;
+        dump_ctx.crossover_v_high = crossover_edge_dir.v_high;
+        dump_ctx.crossover_count = crossover_edge_dir.count;
+        dump_ctx.crossover_incident_on_v0 = crossover_edge_dir.incident_on_v0;
+        dump_ctx.crossover_other_vidx = crossover_edge_dir.other_vidx;
+        dump_ctx.crossover_dir_x = crossover_edge_dir.unit_dir.x();
+        dump_ctx.crossover_dir_y = crossover_edge_dir.unit_dir.y();
+        dump_ctx.crossover_dir_z = crossover_edge_dir.unit_dir.z();
+        dump_ctx.normals_as_points = &normals_as_points;
+        vdc_debug::dump_sep_dir_normals_trace(trace_dir, dump_ctx, dump_entries);
     }
 
     // If center is very close to origin, normals span all directions - no separation
@@ -2872,13 +3038,14 @@ static bool try_separate_cycle_pair_positions_A(
 // Multi-cycle resolution
 // ============================================================================
 
-ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
+static ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     Vertex_handle v,
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
     std::vector<Point>* geometric_attempt_positions_out,
-    bool use_sep_dir
+    bool use_sep_dir,
+    const StrictTetPreservationContext& strict_context
 ) {
     const auto& cycles = v->info().facet_cycles;
     const int num_cycles = static_cast<int>(cycles.size());
@@ -2888,7 +3055,7 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
 
     std::vector<Point> baseline_positions = cycle_isovertices;
     if (apply_dihedral_orientation_gate_to_positions(
-            dt, cell_by_index, v, baseline_positions) > 0) {
+            dt, cell_by_index, v, baseline_positions, strict_context) > 0) {
         cycle_isovertices = baseline_positions;
     }
 
@@ -2928,7 +3095,7 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
             CandidateA2 cand;
             cand.positions = std::move(positions);
             (void)apply_dihedral_orientation_gate_to_positions(
-                dt, cell_by_index, v, cand.positions);
+                dt, cell_by_index, v, cand.positions, strict_context);
             cand.label = label;
             cand.move2 = 0.0;
             for (size_t i = 0; i < cand.positions.size() && i < baseline_positions.size(); ++i) {
@@ -3184,9 +3351,9 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
                 }
 
                 (void)apply_dihedral_orientation_gate_to_cycle_position(
-                    dt, cell_by_index, v, a, newA);
+                    dt, cell_by_index, v, a, newA, strict_context);
                 (void)apply_dihedral_orientation_gate_to_cycle_position(
-                    dt, cell_by_index, v, b, newB);
+                    dt, cell_by_index, v, b, newB, strict_context);
 
                 if (squared_distance(newA, cycle_isovertices[static_cast<size_t>(a)]) > change_eps2) {
                     cycle_isovertices[static_cast<size_t>(a)] = newA;
@@ -3324,7 +3491,7 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
         CandidateAN* best_any = nullptr;
         for (auto& cand : candidates) {
             (void)apply_dihedral_orientation_gate_to_positions(
-                dt, cell_by_index, v, cand.positions);
+                dt, cell_by_index, v, cand.positions, strict_context);
             cand.move2 = compute_move2(cand.positions);
             cand.intersections = count_self_intersection_pairs(v, cand.positions, dt, cell_by_index);
             const bool resolved = (cand.intersections == 0);
@@ -3397,6 +3564,20 @@ ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
     return {ResolutionStatus::UNRESOLVED, ResolutionStrategy::GEOMETRIC_SEPARATION};
 }
 
+ResolutionResult try_resolve_multicycle_by_cycle_separation_tests(
+    Vertex_handle v,
+    std::vector<Point>& cycle_isovertices,
+    const Delaunay& dt,
+    const std::vector<Cell_handle>& cell_by_index,
+    std::vector<Point>* geometric_attempt_positions_out,
+    bool use_sep_dir
+) {
+    StrictTetPreservationContext relaxed_context;
+    return try_resolve_multicycle_by_cycle_separation_tests(
+        v, cycle_isovertices, dt, cell_by_index,
+        geometric_attempt_positions_out, use_sep_dir, relaxed_context);
+}
+
 static bool multicycle_is_definitely_separated_by_bisecting_planes(
     Vertex_handle v,
     const std::vector<Point>& cycle_isovertices,
@@ -3443,7 +3624,8 @@ static ResolutionResult try_resolve_cycle_fan_foldover_at_vertex_cycle(
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
-    double foldover_sphere_radius
+    double foldover_sphere_radius,
+    const StrictTetPreservationContext& strict_context
 );
 
 static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
@@ -3453,7 +3635,8 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
     const std::vector<Cell_handle>& cell_by_index,
     const CycleIsovertexOptions& options,
     double foldover_sphere_radius,
-    std::unordered_set<int>* local_unresolved_dumped_vertices
+    std::unordered_set<int>* local_unresolved_dumped_vertices,
+    const StrictTetPreservationContext& strict_context
 ) {
     const int num_cycles = static_cast<int>(v->info().facet_cycles.size());
     if (num_cycles < 2) {
@@ -3515,7 +3698,7 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
         }
 
         const ResolutionResult foldover_result = try_resolve_cycle_fan_foldover_at_vertex_cycle(
-            v, fold_cycle, cycle_isovertices, dt, cell_by_index, foldover_sphere_radius);
+            v, fold_cycle, cycle_isovertices, dt, cell_by_index, foldover_sphere_radius, strict_context);
         if (foldover_result.status == ResolutionStatus::RESOLVED) {
             DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
                         << " resolved by deterministic fan foldover (cycles=" << num_cycles << ").");
@@ -3535,7 +3718,8 @@ static ResolutionResult resolve_multicycle_self_intersection_at_vertex(
             dt,
             cell_by_index,
             &geometric_attempt_positions,
-            options.use_sep_dir);
+            options.use_sep_dir,
+            strict_context);
     if (separation_result.status == ResolutionStatus::RESOLVED) {
         DEBUG_PRINT("[DEL-SELFI] Vertex " << v->info().index
                     << " resolved by geometric separation (cycles=" << num_cycles << ").");
@@ -3658,7 +3842,8 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
     bool move_cap,
     bool move_cap_strict,
     int sep_split,
-    int supersample_r
+    int supersample_r,
+    const StrictTetPreservationContext& strict_context
 ) {
     std::vector<Vertex_handle> multi_cycle_vertices;
     
@@ -3723,6 +3908,12 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                     bool has_sep_dir = false;
                     float sep_dir[3] = {0.0f, 0.0f, 0.0f};
                     double maxdist = std::numeric_limits<double>::infinity();
+                    int acute_dihedral_constraints = 0;
+                    int strict_preserve_hits = 0;
+                    int strict_preserve_rejects = 0;
+                    int direction_keep = 0;
+                    int direction_skip = 0;
+                    bool directional_cap_applied = false;
                     double cap_radius = 0.0;
                     Point projected = Point(0.0, 0.0, 0.0);
                 };
@@ -3739,16 +3930,6 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                     InitialCycleDirPlan& plan = plans[c];
                     plan.projected = cube_center;
 
-                    if (move_cap) {
-                        plan.maxdist = compute_cycle_maxdist_to_opposite_face_planes(
-                            dt, cell_by_index, vit, static_cast<int>(c),
-                            /*require_tprime_crosses_isov=*/move_cap_strict);
-                    }
-                    plan.cap_radius =
-                        (move_cap && std::isfinite(plan.maxdist)
-                            ? std::min(sphere_radius, 0.5 * plan.maxdist)
-                            : sphere_radius);
-
                     int fold_candidates = 0;
                     plan.foldover = detect_cycle_crossover_edge_direction(
                         vit, cycles[c], cell_by_index, dt, &fold_candidates);
@@ -3764,15 +3945,52 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                             vit, cycles[c], cell_by_index, dt, static_cast<int>(c), plan.sep_dir);
                     }
 
+                    if (move_cap) {
+                        const bool run_relax_cap = !move_cap_strict;
+                        const bool run_strict_directional_cap = move_cap_strict && plan.has_sep_dir;
+                        if (run_relax_cap || run_strict_directional_cap) {
+                            const Vector3 move_dir(
+                                static_cast<double>(plan.sep_dir[0]),
+                                static_cast<double>(plan.sep_dir[1]),
+                                static_cast<double>(plan.sep_dir[2]));
+                            const Vector3* move_dir_ptr =
+                                (run_strict_directional_cap ? &move_dir : nullptr);
+                            const CycleMoveCapBound cap = compute_cycle_maxdist_to_opposite_face_planes(
+                                dt,
+                                cell_by_index,
+                                vit,
+                                static_cast<int>(c),
+                                strict_context,
+                                move_dir_ptr);
+                            plan.maxdist = cap.maxdist;
+                            plan.acute_dihedral_constraints = cap.acute_dihedral_constraints;
+                            plan.strict_preserve_hits = cap.strict_preserve_hits;
+                            plan.strict_preserve_rejects = cap.strict_preserve_rejects;
+                            plan.direction_keep = cap.direction_keep;
+                            plan.direction_skip = cap.direction_skip;
+                            plan.directional_cap_applied = run_strict_directional_cap;
+                        }
+                    }
+                    plan.cap_radius =
+                        (move_cap && std::isfinite(plan.maxdist)
+                            ? std::min(sphere_radius, 0.5 * plan.maxdist)
+                            : sphere_radius);
+
                     if (trace_cap) {
                         DEBUG_PRINT("[DEL-MOVE-CAP] v=" << vit->info().index
                                     << " cycle=" << c
                                     << " r1=" << sphere_radius
                                     << " maxdist=" << plan.maxdist
                                     << " cap_r=" << plan.cap_radius
+                                    << " acute_dihedral=" << plan.acute_dihedral_constraints
+                                    << " strict_keep=" << plan.strict_preserve_hits
+                                    << " strict_skip=" << plan.strict_preserve_rejects
+                                    << " direction_keep=" << plan.direction_keep
+                                    << " direction_skip=" << plan.direction_skip
                                     << " foldover_candidates_ge4=" << fold_candidates
                                     << " foldover_edge=" << (plan.has_foldover_edge ? "yes" : "no")
                                     << " has_sep_dir=" << (plan.has_sep_dir ? "yes" : "no")
+                                    << " directional_cap=" << (plan.directional_cap_applied ? "yes" : "no")
                                     << (skip_sep_dir_for_foldover ? " (skipped_by_foldover)" : "")
                                     << (move_cap ? (move_cap_strict ? " (strict)" : " (relax)") : " (disabled)"));
                     }
@@ -3847,7 +4065,7 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                                     << " no separating direction; fallback to DelV center");
                     }
                     (void)apply_dihedral_orientation_gate_to_cycle_position(
-                        dt, cell_by_index, vit, static_cast<int>(c), plans[c].projected);
+                        dt, cell_by_index, vit, static_cast<int>(c), plans[c].projected, strict_context);
                     isovertices[c] = plans[c].projected;
                 }
             }
@@ -3933,7 +4151,8 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
     const std::vector<Vertex_handle>& multi_cycle_vertices,
     IsovertexComputationStats& stats,
     const CycleIsovertexOptions& options,
-    double foldover_sphere_radius
+    double foldover_sphere_radius,
+    const StrictTetPreservationContext& strict_context
 ) {
     std::vector<Vertex_handle> modified_multi_cycle_vertices;
     std::unordered_set<int> modified_multi_cycle_indices;
@@ -3979,7 +4198,8 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
                 cell_by_index,
                 options,
                 foldover_sphere_radius,
-                local_unresolved_dumped_vertices_ptr);
+                local_unresolved_dumped_vertices_ptr,
+                strict_context);
 
 	            update_resolution_stats(result, stats, any_changed,
 	                pass_detected, pass_resolved, pass_unresolved);
@@ -4047,7 +4267,7 @@ static std::vector<Vertex_handle> resolve_multicycle_self_intersections(
                 const std::vector<Point> isovertices_before = isovertices;
 
                 const ResolutionResult result = try_resolve_cycle_fan_foldover_at_vertex_cycle(
-                    vh, /*cycle_idx=*/0, isovertices, dt, cell_by_index, foldover_sphere_radius);
+                    vh, /*cycle_idx=*/0, isovertices, dt, cell_by_index, foldover_sphere_radius, strict_context);
 
                 update_resolution_stats(result, stats, any_changed,
                     pass_detected, pass_resolved, pass_unresolved);
@@ -4271,7 +4491,8 @@ static ResolutionResult try_resolve_cycle_fan_foldover_at_vertex_cycle(
     std::vector<Point>& cycle_isovertices,
     const Delaunay& dt,
     const std::vector<Cell_handle>& cell_by_index,
-    double foldover_sphere_radius
+    double foldover_sphere_radius,
+    const StrictTetPreservationContext& strict_context
 ) {
     const auto& cycles = v->info().facet_cycles;
     if (cycle_idx < 0 || cycle_idx >= static_cast<int>(cycles.size())) {
@@ -4413,7 +4634,7 @@ static ResolutionResult try_resolve_cycle_fan_foldover_at_vertex_cycle(
             center.y() + sign * r * dir.y(),
             center.z() + sign * r * dir.z());
         (void)apply_dihedral_orientation_gate_to_cycle_position(
-            dt, cell_by_index, v, cycle_idx, cand);
+            dt, cell_by_index, v, cycle_idx, cand, strict_context);
         const bool within_ok = !cycle_fan_has_within_cycle_intersection(
             dt, v, cycle_idx, cand, cell_by_index);
         if (trace) {
@@ -4465,7 +4686,8 @@ static void resolve_suspect_cycle_fan_foldovers(
     const std::vector<Vertex_handle>& modified_multi_cycle_vertices,
     IsovertexComputationStats& stats,
     const CycleIsovertexOptions& options,
-    double foldover_sphere_radius
+    double foldover_sphere_radius,
+    const StrictTetPreservationContext& strict_context
 ) {
     if (!options.foldover) {
         return;
@@ -4600,7 +4822,7 @@ static void resolve_suspect_cycle_fan_foldovers(
             const std::vector<Point> before = isovertices;
 
             const ResolutionResult result = try_resolve_cycle_fan_foldover_at_vertex_cycle(
-                ref.v, ref.cycle, isovertices, dt, cell_by_index, foldover_sphere_radius);
+                ref.v, ref.cycle, isovertices, dt, cell_by_index, foldover_sphere_radius, strict_context);
 
             if (result.status != ResolutionStatus::NOT_NEEDED) {
                 pass_detected++;
@@ -4715,6 +4937,16 @@ void compute_cycle_isovertices(
     // Build a direct lookup table for efficient cell access by index.
     const std::vector<Cell_handle> cell_by_index = build_cell_index_vector(dt);
 
+    IsosurfaceEdgeSet strict_isosurface_edges;
+    StrictTetPreservationContext strict_context;
+    strict_context.strict_mode = options.move_cap_strict;
+    if (strict_context.strict_mode) {
+        strict_isosurface_edges = build_isosurface_edge_membership_set(dt);
+        strict_context.isosurface_edges = &strict_isosurface_edges;
+        DEBUG_PRINT("[DEL-MOVE-CAP] strict-preserve-edge-set size="
+                    << strict_isosurface_edges.size());
+    }
+
     // Initialize statistics tracking.
     IsovertexComputationStats stats;
 
@@ -4734,7 +4966,8 @@ void compute_cycle_isovertices(
     // ========================================================================
     std::vector<Vertex_handle> multi_cycle_vertices = initialize_cycle_isovertices(
         dt, grid, isovalue, cell_by_index, stats, options.position_multi_isov_on_delv,
-        options.move_cap, options.move_cap_strict, options.sep_split, options.supersample_r);
+        options.move_cap, options.move_cap_strict, options.sep_split, options.supersample_r,
+        strict_context);
 
     if (options.position_multi_isov_on_delv) {
         DEBUG_PRINT("[DEL-ISOV] Skipping multi-cycle repositioning (-position_multi_isov_on_delv).");
@@ -4746,7 +4979,7 @@ void compute_cycle_isovertices(
     // Stage 2: Resolve self-intersections
     // ========================================================================
     (void)resolve_multicycle_self_intersections(
-        dt, cell_by_index, multi_cycle_vertices, stats, options, sphere_radius);
+        dt, cell_by_index, multi_cycle_vertices, stats, options, sphere_radius, strict_context);
 
     // ========================================================================
     // Report final statistics.

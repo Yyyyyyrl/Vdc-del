@@ -27,11 +27,11 @@ struct VdcParam {
     bool foldover = false;         //!< Enable Stage 3: within-cycle fan foldover resolution
     bool use_sep_dir = false;      //!< Use separation-direction-based resolution instead of reflection candidates
     bool move_cap = true;          //!< Enable deterministic move-cap for multi-cycle isovertex projection (default: enabled)
-    bool move_cap_strict = true;  //!< If true, use strict move-cap (require opposite face t' crosses the isovalue).
+    bool move_cap_strict = true;  //!< If true, enable strict tet-preservation gating in move-cap/orientation checks.
     bool out_delv = false;         //!< Output Delaunay triangulation to delv_xxx.off
-    bool out_delv_has_bbox = false; //!< If true, crop Delaunay output to bounding box
-    double out_delv_bbox_min[3] = {0, 0, 0}; //!< Min corner of bounding box for -out_delv
-    double out_delv_bbox_max[3] = {0, 0, 0}; //!< Max corner of bounding box for -out_delv
+    bool out_delv_has_bbox = false; //!< If true, crop Delaunay output to physical/output-space bounding box
+    double out_delv_bbox_min[3] = {0, 0, 0}; //!< Min corner of physical/output-space bounding box for -out_delv
+    double out_delv_bbox_max[3] = {0, 0, 0}; //!< Max corner of physical/output-space bounding box for -out_delv
     bool terse = false;            //!< Guard: print only vertices/triangles and output file
     bool timing_stats = false;     //!< Guard: print timing statistics at the end of the run
     bool refine_small_angles = false; //!< Guard: enable facet-centric surface refinement

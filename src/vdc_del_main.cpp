@@ -181,19 +181,19 @@ int main(int argc, char* argv[]) {
     std::vector<std::vector<GridFacets>> grid_facets = create_grid_facets(activeCubes);
 
     // Get cube centers for Delaunay vertices
-    std::vector<Point> cubeCenters;
+    std::vector<Point> delaunaySites;
 
     // Use accurate iso-crossing points when explicitly requested or when
     // separation uses a refined subgrid (keeps site selection consistent).
     if (param.position_delv_on_isov) {
-        cubeCenters = get_cube_accurate_iso_crossing_points(activeCubes);
+        delaunaySites = get_cube_accurate_iso_crossing_points(activeCubes);
     } else {
-        cubeCenters = get_cube_centers(activeCubes);
+        delaunaySites = get_cube_centers(activeCubes);
     }
 
     // Construct Delaunay triangulation
     Delaunay dt;
-    construct_delaunay_triangulation(dt, grid, grid_facets, param, cubeCenters);
+    construct_delaunay_triangulation(dt, grid, grid_facets, param, delaunaySites);
 
     TimingStats::getInstance().stopTimer("Delaunay", "Total");
 
@@ -250,7 +250,8 @@ int main(int argc, char* argv[]) {
             delv_filename,
             param.out_delv_has_bbox,
             param.out_delv_bbox_min,
-            param.out_delv_bbox_max);
+            param.out_delv_bbox_max,
+            {grid.physical_spacing[0], grid.physical_spacing[1], grid.physical_spacing[2]});
     }
 
     // ========================================================================

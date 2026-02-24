@@ -37,11 +37,11 @@ void print_help()
     std::cout << "  -position_delv_on_grid_center: Position Delaunay vertices on cube centers.\n";
     std::cout << "  -foldover                   : Enable deterministic within-cycle fan foldover resolution (integrated into Stage 2 stabilization).\n";
     std::cout << "  -use_sep_dir                : Use separation-direction-based resolution (min-sphere of facet normals) instead of reflection candidates.\n";
-    std::cout << "  -move_cap_strict            : Enable strict move-cap: only use opposite faces t' that cross the isovalue.\n";
-    std::cout << "  -move_cap_relax             : Enable relaxed move-cap: allow any opposite face t' (default).\n";
+    std::cout << "  -move_cap_strict            : Enable strict tet-preservation gating for move-cap and orientation checks.\n";
+    std::cout << "  -move_cap_relax             : Enable relaxed gating: allow any opposite face t' (default).\n";
     std::cout << "  -no_move_cap                : Disable move-cap (restores the pre-cap multi-cycle projection radius).\n";
     std::cout << "  -out_delv [\"xmin ymin zmin\" \"xmax ymax zmax\"] : Output Delaunay triangulation to delv_<mesh>.off.\n";
-    std::cout << "                               Optional: specify bounding box to crop the output.\n";
+    std::cout << "                               Optional: specify a physical-space/output-space bounding box to crop the output.\n";
     std::cout << "  -refine_small_angles        : Insert Delaunay sites at circumsphere centers to improve small angles near the isosurface.\n";
     std::cout << "                               Default trigger: min_angle=20 deg, max_angle=off.\n";
     std::cout << "  -min_angle {deg}            : Trigger refinement if any isosurface-facet triangle angle (per-site iso-sample) is below this threshold.\n";
@@ -171,7 +171,7 @@ void parse_arguments(int argc, char *argv[], VdcParam &vp)
         {
             vp.out_delv = true;
             // Check if next two arguments look like bounding box coordinates (quoted strings with 3 numbers each)
-            // Format: -out_delv "xmin ymin zmin" "xmax ymax zmax"
+            // Format: -out_delv "xmin ymin zmin" "xmax ymax zmax" in physical/output coordinates.
             if (i + 2 < argc && argv[i + 1][0] != '-' && argv[i + 2][0] != '-') {
                 // Try to parse the bounding box
                 double min_coords[3], max_coords[3];
