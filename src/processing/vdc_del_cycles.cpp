@@ -4219,6 +4219,9 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                 struct InitialCycleDirPlan {
                     bool has_foldover_edge = false;
                     CycleFoldoverEdgeInfo foldover;
+                    int foldover_candidates_ge4 = 0;
+                    bool skip_sep_dir_for_foldover = false;
+                    bool sep_dir_attempted = false;
                     bool has_sep_dir = false;
                     float sep_dir[3] = {0.0f, 0.0f, 0.0f};
                     double maxdist = std::numeric_limits<double>::infinity();
@@ -4247,29 +4250,45 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                     int fold_candidates = 0;
                     plan.foldover = detect_cycle_crossover_edge_direction(
                         vit, cycles[c], cell_by_index, dt, &fold_candidates);
+                    plan.foldover_candidates_ge4 = fold_candidates;
                     plan.has_foldover_edge = plan.foldover.found;
 
                     // Requested logic (2-cycle case): if this cycle has a 4-facet shared edge,
                     // skip sep-dir computation for that cycle and handle placement after both
                     // cycles are classified.
-                    const bool skip_sep_dir_for_foldover =
+                    plan.skip_sep_dir_for_foldover =
                         (cycles.size() == 2 && plan.has_foldover_edge);
-                    if (!skip_sep_dir_for_foldover) {
+                    if (!plan.skip_sep_dir_for_foldover) {
+                        plan.sep_dir_attempted = true;
                         plan.has_sep_dir = compute_cycle_separating_direction(
                             vit, cycles[c], cell_by_index, dt, static_cast<int>(c), plan.sep_dir);
+                    }
+                }
 
-                        // If no valid direction found, try simplifying the cycle
-                        // (eliminating co-tet facet pairs) and retry.
-                        if (!plan.has_sep_dir) {
-                            const auto simplified = simplify_cycle_facets(
-                                vit, cycles[c], cell_by_index, dt, static_cast<int>(c));
-                            if (simplified.size() < cycles[c].size()) {
-                                plan.has_sep_dir = compute_cycle_separating_direction(
-                                    vit, simplified, cell_by_index, dt, static_cast<int>(c), plan.sep_dir, "_final");
-                            }
+                // Only run simplify pass when more than one cycle fails sep-dir, and only
+                // on those failed cycles.
+                std::vector<size_t> sep_dir_failed_cycles;
+                sep_dir_failed_cycles.reserve(cycles.size());
+                for (size_t c = 0; c < cycles.size(); ++c) {
+                    const InitialCycleDirPlan& plan = plans[c];
+                    if (plan.sep_dir_attempted && !plan.has_sep_dir) {
+                        sep_dir_failed_cycles.push_back(c);
+                    }
+                }
+                if (sep_dir_failed_cycles.size() > 1) {
+                    for (size_t c : sep_dir_failed_cycles) {
+                        InitialCycleDirPlan& plan = plans[c];
+                        const auto simplified = simplify_cycle_facets(
+                            vit, cycles[c], cell_by_index, dt, static_cast<int>(c));
+                        if (simplified.size() < cycles[c].size()) {
+                            plan.has_sep_dir = compute_cycle_separating_direction(
+                                vit, simplified, cell_by_index, dt, static_cast<int>(c), plan.sep_dir, "_final");
                         }
                     }
+                }
 
+                for (size_t c = 0; c < cycles.size(); ++c) {
+                    InitialCycleDirPlan& plan = plans[c];
                     if (move_cap) {
                         const bool run_relax_cap = !move_cap_strict;
                         const bool run_strict_directional_cap = move_cap_strict && plan.has_sep_dir;
@@ -4312,11 +4331,11 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                                     << " strict_skip=" << plan.strict_preserve_rejects
                                     << " direction_keep=" << plan.direction_keep
                                     << " direction_skip=" << plan.direction_skip
-                                    << " foldover_candidates_ge4=" << fold_candidates
+                                    << " foldover_candidates_ge4=" << plan.foldover_candidates_ge4
                                     << " foldover_edge=" << (plan.has_foldover_edge ? "yes" : "no")
                                     << " has_sep_dir=" << (plan.has_sep_dir ? "yes" : "no")
                                     << " directional_cap=" << (plan.directional_cap_applied ? "yes" : "no")
-                                    << (skip_sep_dir_for_foldover ? " (skipped_by_foldover)" : "")
+                                    << (plan.skip_sep_dir_for_foldover ? " (skipped_by_foldover)" : "")
                                     << (move_cap ? (move_cap_strict ? " (strict)" : " (relax)") : " (disabled)"));
                     }
                 }
