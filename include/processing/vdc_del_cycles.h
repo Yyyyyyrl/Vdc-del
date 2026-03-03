@@ -274,7 +274,8 @@ bool compute_cycle_separating_direction(
     const std::vector<Cell_handle>& cell_by_index,
     const Delaunay& dt,
     int cycle_index,
-    float separation_direction[3]
+    float separation_direction[3],
+    const std::string& trace_suffix = ""
 );
 
 #endif // VDC_DEL_CYCLES_H

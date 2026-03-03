@@ -224,7 +224,8 @@ struct SepDirDumpContext {
 void dump_sep_dir_normals_trace(
     const std::string& trace_dir,
     const SepDirDumpContext& ctx,
-    const std::vector<FacetNormalDumpEntry>& entries);
+    const std::vector<FacetNormalDumpEntry>& entries,
+    const std::string& trace_suffix = "");
 
 void finalize_multi_isov_trace(
     const CycleIsovertexOptions& options,

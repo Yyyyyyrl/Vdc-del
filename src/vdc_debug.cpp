@@ -2535,7 +2535,8 @@ MoveCapTraceWriteResult write_move_cap_trace_file(
 void dump_sep_dir_normals_trace(
     const std::string& trace_dir,
     const SepDirDumpContext& ctx,
-    const std::vector<FacetNormalDumpEntry>& dump_entries
+    const std::vector<FacetNormalDumpEntry>& dump_entries,
+    const std::string& trace_suffix
 ) {
     if (trace_dir.empty()) {
         return;
@@ -2552,7 +2553,7 @@ void dump_sep_dir_normals_trace(
 
     const int vidx = ctx.v0->info().index;
     const std::filesystem::path path =
-        out_dir / ("sep_dir_v" + std::to_string(vidx) + "_c" + std::to_string(ctx.cycle_index) + ".txt");
+        out_dir / ("sep_dir_v" + std::to_string(vidx) + "_c" + std::to_string(ctx.cycle_index) + trace_suffix + ".txt");
 
     std::ofstream out(path);
     if (!out) {

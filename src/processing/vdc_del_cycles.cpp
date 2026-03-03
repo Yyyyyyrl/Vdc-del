@@ -2567,6 +2567,319 @@ static CycleFoldoverEdgeInfo detect_cycle_crossover_edge_direction(
     return out;
 }
 
+// Helper: extract the 3 vertex points of a Delaunay facet (opposite to facet_idx vertex).
+// Returns false if any vertex is invalid/infinite.
+static bool get_facet_triangle_points(
+    const Delaunay& dt,
+    Cell_handle cell,
+    int facet_idx,
+    Point out_pts[3]
+) {
+    for (int k = 0; k < 3; ++k) {
+        const int vi = (facet_idx + 1 + k) % 4;
+        Vertex_handle vh = cell->vertex(vi);
+        if (vh == Vertex_handle() || dt.is_infinite(vh)) return false;
+        out_pts[k] = vh->point();
+    }
+    return true;
+}
+
+// Helper: compute outward unit normal of a facet, oriented toward the positive cell.
+static Vector3 compute_facet_outward_normal(
+    const Delaunay& dt,
+    Cell_handle cell,
+    int facet_idx,
+    const Point pts[3]
+) {
+    const Vector3 e1(pts[0], pts[1]);
+    const Vector3 e2(pts[0], pts[2]);
+    Vector3 n = vec_cross(e1, e2);
+    const double len = vec_norm(n);
+    if (len < 1e-20) return Vector3(0, 0, 0);
+    n = n / len;
+    // Orient toward the cell side (positive cell by convention).
+    Vertex_handle opp = cell->vertex(facet_idx);
+    if (opp != Vertex_handle() && !dt.is_infinite(opp)) {
+        if (vec_dot(n, Vector3(pts[0], opp->point())) < 0) {
+            n = -n;
+        }
+    }
+    return n;
+}
+
+static std::vector<std::pair<int,int>> simplify_cycle_facets(
+    Vertex_handle v0,
+    const std::vector<std::pair<int,int>>& cycle_facets,
+    const std::vector<Cell_handle>& cell_by_index,
+    const Delaunay& dt,
+    int cycle_index
+) {
+    if (v0 == Vertex_handle()) {
+        return cycle_facets;
+    }
+    const auto& all_cycles = v0->info().facet_cycles;
+
+    // Build a set of FacetKeys belonging to OTHER cycles of v0 for quick lookup.
+    std::set<std::pair<int,int>> other_cycle_facets;
+    for (int c = 0; c < static_cast<int>(all_cycles.size()); ++c) {
+        if (c == cycle_index) continue;
+        for (const auto& fk : all_cycles[static_cast<size_t>(c)]) {
+            other_cycle_facets.insert(fk);
+        }
+    }
+
+    const bool trace = vdc_debug::trace_selfi_enabled(v0->info().index);
+    const std::string trace_dir = trace ? vdc_debug::trace_selfi_dump_dir() : std::string();
+    const bool dump_file = trace && !trace_dir.empty();
+
+    // Open trace file if tracing enabled.
+    std::ofstream trace_out;
+    if (dump_file) {
+        std::error_code ec;
+        std::filesystem::path out_dir(trace_dir);
+        std::filesystem::create_directories(out_dir, ec);
+        const int vidx = v0->info().index;
+        const std::filesystem::path path =
+            out_dir / ("sim_cyc_v" + std::to_string(vidx) + "_c" + std::to_string(cycle_index) + ".txt");
+        trace_out.open(path);
+        if (trace_out) {
+            trace_out << std::setprecision(17);
+            const Point center = v0->point();
+            trace_out << "vertex_index " << vidx << "\n";
+            trace_out << "cycle_index " << cycle_index << "\n";
+            trace_out << "center " << center.x() << " " << center.y() << " " << center.z() << "\n";
+            trace_out << "initial_facet_count " << cycle_facets.size() << "\n\n";
+        }
+    }
+
+    // Lambda: dump the current state of the cycle (all facets with geometry + normals).
+    auto dump_iteration_state = [&](int iteration, const std::vector<std::pair<int,int>>& facets,
+                                    int sel_i, int sel_j, Cell_handle shared_tet,
+                                    const std::vector<Cell_handle>& mc_cells,
+                                    const std::vector<int>& mc_fis) {
+        if (!trace_out) return;
+        trace_out << "iteration " << iteration << "\n";
+        trace_out << "facet_count " << facets.size() << "\n";
+
+        // Dump all facets in this iteration.
+        for (int i = 0; i < static_cast<int>(facets.size()); ++i) {
+            const auto& [cell_idx, facet_idx] = facets[static_cast<size_t>(i)];
+            Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
+            bool valid = (cell != Cell_handle() && !dt.is_infinite(cell)
+                          && facet_idx >= 0 && facet_idx < 4);
+            Point pts[3] = {Point(0,0,0), Point(0,0,0), Point(0,0,0)};
+            Vector3 normal(0,0,0);
+            if (valid) {
+                valid = get_facet_triangle_points(dt, cell, facet_idx, pts);
+                if (valid) {
+                    normal = compute_facet_outward_normal(dt, cell, facet_idx, pts);
+                }
+            }
+
+            // Mark if this facet is one of the selected pair.
+            const char* role = "";
+            if (i == sel_i) role = " SELECTED_F";
+            else if (i == sel_j) role = " SELECTED_F'";
+
+            // Mirror cell info (tet on non-cycle side).
+            int mc_idx_val = -1;
+            if (i < static_cast<int>(mc_cells.size()) && mc_cells[static_cast<size_t>(i)] != Cell_handle()) {
+                mc_idx_val = mc_cells[static_cast<size_t>(i)]->info().index;
+            }
+
+            trace_out << "facet idx=" << i
+                      << " cell=" << cell_idx << " fi=" << facet_idx
+                      << " mirror_cell=" << mc_idx_val
+                      << " p0=(" << pts[0].x() << "," << pts[0].y() << "," << pts[0].z() << ")"
+                      << " p1=(" << pts[1].x() << "," << pts[1].y() << "," << pts[1].z() << ")"
+                      << " p2=(" << pts[2].x() << "," << pts[2].y() << "," << pts[2].z() << ")"
+                      << " n=(" << normal.x() << "," << normal.y() << "," << normal.z() << ")"
+                      << role << "\n";
+        }
+
+        // Dump the shared tet geometry if a replacement is happening.
+        if (shared_tet != Cell_handle() && !dt.is_infinite(shared_tet)) {
+            trace_out << "shared_tet cell=" << shared_tet->info().index;
+            for (int k = 0; k < 4; ++k) {
+                Vertex_handle vh = shared_tet->vertex(k);
+                if (vh != Vertex_handle() && !dt.is_infinite(vh)) {
+                    const Point& p = vh->point();
+                    trace_out << " v" << k << "=(" << p.x() << "," << p.y() << "," << p.z() << ")";
+                } else {
+                    trace_out << " v" << k << "=(inf)";
+                }
+            }
+            trace_out << "\n";
+        }
+        trace_out << "\n";
+    };
+
+    std::vector<std::pair<int,int>> result = cycle_facets;
+    bool changed = true;
+    int iteration = 0;
+
+    while (changed) {
+        changed = false;
+        const int n = static_cast<int>(result.size());
+        if (n < 2) break;
+
+        // For each facet, compute its mirror cell (the tet on the non-cycle side).
+        // Group facets by mirror cell index.
+        std::unordered_map<int, std::vector<int>> mirror_cell_to_facet_indices;
+        std::vector<Cell_handle> mirror_cells(static_cast<size_t>(n), Cell_handle());
+        std::vector<int> mirror_facet_indices(static_cast<size_t>(n), -1);
+
+        for (int i = 0; i < n; ++i) {
+            const auto& [cell_idx, facet_idx] = result[static_cast<size_t>(i)];
+            Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
+            if (cell == Cell_handle() || dt.is_infinite(cell)) continue;
+            if (facet_idx < 0 || facet_idx >= 4) continue;
+
+            const Facet mirror = dt.mirror_facet(Facet(cell, facet_idx));
+            Cell_handle mirror_cell = mirror.first;
+            if (mirror_cell == Cell_handle() || dt.is_infinite(mirror_cell)) continue;
+
+            mirror_cells[static_cast<size_t>(i)] = mirror_cell;
+            mirror_facet_indices[static_cast<size_t>(i)] = mirror.second;
+            const int mc_idx = mirror_cell->info().index;
+            mirror_cell_to_facet_indices[mc_idx].push_back(i);
+        }
+
+        // Find a VALID pair: co-tet, not in other cycle, and replacement facet is isosurface.
+        // Try all candidate pairs until one fully validates.
+        int replace_i = -1, replace_j = -1;
+        Cell_handle shared_tet;
+        int new_cell_idx = -1, new_facet_idx = -1;
+
+        for (const auto& [mc_idx, indices] : mirror_cell_to_facet_indices) {
+            if (indices.size() < 2) continue;
+            for (size_t a = 0; a < indices.size() && replace_i < 0; ++a) {
+                for (size_t b = a + 1; b < indices.size() && replace_i < 0; ++b) {
+                    const int ii = indices[a];
+                    const int jj = indices[b];
+                    const auto& fi = result[static_cast<size_t>(ii)];
+                    const auto& fj = result[static_cast<size_t>(jj)];
+                    if (other_cycle_facets.count(fi) || other_cycle_facets.count(fj)) continue;
+
+                    // Validate: find the third v0-incident facet and check it's an iso-facet.
+                    Cell_handle cand_tet = mirror_cells[static_cast<size_t>(ii)];
+                    int cand_mirror_fi = mirror_facet_indices[static_cast<size_t>(ii)];
+                    int cand_mirror_fj = mirror_facet_indices[static_cast<size_t>(jj)];
+
+                    const int v0_local = find_vertex_index_in_cell(cand_tet, v0);
+                    if (v0_local < 0) continue;
+
+                    int repl_fi = -1;
+                    for (int k = 0; k < 4; ++k) {
+                        if (k == v0_local) continue;
+                        if (k == cand_mirror_fi) continue;
+                        if (k == cand_mirror_fj) continue;
+                        repl_fi = k;
+                        break;
+                    }
+                    if (repl_fi < 0) continue;
+
+                    // Convert to positive-cell convention.
+                    int cand_new_cell_idx, cand_new_facet_idx;
+                    if (cand_tet->info().flag_positive) {
+                        cand_new_cell_idx = cand_tet->info().index;
+                        cand_new_facet_idx = repl_fi;
+                    } else {
+                        const Facet mirrored = dt.mirror_facet(Facet(cand_tet, repl_fi));
+                        if (mirrored.first == Cell_handle() || dt.is_infinite(mirrored.first)) continue;
+                        cand_new_cell_idx = mirrored.first->info().index;
+                        cand_new_facet_idx = mirrored.second;
+                    }
+
+                    // Basic validity check on the replacement facet cell.
+                    Cell_handle new_cell = lookup_cell(cell_by_index, cand_new_cell_idx);
+                    if (new_cell == Cell_handle() || dt.is_infinite(new_cell)) continue;
+                    if (cand_new_facet_idx < 0 || cand_new_facet_idx >= 4) continue;
+
+                    // All validation passed — accept this pair.
+                    replace_i = ii;
+                    replace_j = jj;
+                    shared_tet = cand_tet;
+                    new_cell_idx = cand_new_cell_idx;
+                    new_facet_idx = cand_new_facet_idx;
+                }
+            }
+            if (replace_i >= 0) break;
+        }
+
+        // Dump iteration state BEFORE the replacement (so we see the pair being combined).
+        if (dump_file) {
+            dump_iteration_state(iteration, result, replace_i, replace_j, shared_tet,
+                                 mirror_cells, mirror_facet_indices);
+        }
+
+        if (replace_i < 0) break;
+
+        if (trace) {
+            const auto& fi = result[static_cast<size_t>(replace_i)];
+            const auto& fj = result[static_cast<size_t>(replace_j)];
+            DEBUG_PRINT("[DEL-SIMPLIFY-CYCLE] v=" << v0->info().index
+                        << " cycle=" << cycle_index
+                        << " replacing facets (" << fi.first << "," << fi.second << ")"
+                        << " and (" << fj.first << "," << fj.second << ")"
+                        << " via shared tet (cell " << shared_tet->info().index << ")"
+                        << " with (" << new_cell_idx << "," << new_facet_idx << ")"
+                        << " facet_count " << result.size() << " -> " << (result.size() - 1));
+        }
+
+        if (dump_file && trace_out) {
+            const auto& fi = result[static_cast<size_t>(replace_i)];
+            const auto& fj = result[static_cast<size_t>(replace_j)];
+            trace_out << "replace f=(" << fi.first << "," << fi.second << ")"
+                      << " f'=(" << fj.first << "," << fj.second << ")"
+                      << " shared_tet=" << shared_tet->info().index
+                      << " f''=(" << new_cell_idx << "," << new_facet_idx << ")\n\n";
+        }
+
+        // Perform the replacement.
+        int hi = std::max(replace_i, replace_j);
+        int lo = std::min(replace_i, replace_j);
+        result.erase(result.begin() + hi);
+        result.erase(result.begin() + lo);
+        result.emplace_back(new_cell_idx, new_facet_idx);
+        changed = true;
+        ++iteration;
+    }
+
+    // Always dump the final state with incident tet info.
+    if (dump_file && trace_out) {
+        // Recompute mirror cells for the final state.
+        const int fn = static_cast<int>(result.size());
+        std::vector<Cell_handle> final_mirror_cells(static_cast<size_t>(fn), Cell_handle());
+        std::vector<int> final_mirror_fi(static_cast<size_t>(fn), -1);
+        for (int i = 0; i < fn; ++i) {
+            const auto& [cell_idx, facet_idx] = result[static_cast<size_t>(i)];
+            Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
+            if (cell == Cell_handle() || dt.is_infinite(cell)) continue;
+            if (facet_idx < 0 || facet_idx >= 4) continue;
+            const Facet mirror = dt.mirror_facet(Facet(cell, facet_idx));
+            if (mirror.first != Cell_handle() && !dt.is_infinite(mirror.first)) {
+                final_mirror_cells[static_cast<size_t>(i)] = mirror.first;
+                final_mirror_fi[static_cast<size_t>(i)] = mirror.second;
+            }
+        }
+        dump_iteration_state(iteration, result, -1, -1, Cell_handle(),
+                             final_mirror_cells, final_mirror_fi);
+        trace_out << "final_facet_count " << result.size() << "\n";
+        trace_out << "total_iterations " << iteration << "\n";
+        trace_out << "simplified " << (result.size() < cycle_facets.size() ? "yes" : "no") << "\n";
+    }
+
+    if (trace && result.size() < cycle_facets.size()) {
+        DEBUG_PRINT("[DEL-SIMPLIFY-CYCLE] v=" << v0->info().index
+                    << " cycle=" << cycle_index
+                    << " simplified " << cycle_facets.size()
+                    << " -> " << result.size() << " facets");
+    }
+
+    return result;
+}
+
 //! @brief Compute a direction that separates new cycle facets from old cycle facets.
 //!
 //! For each facet in the cycle, computes the unit outward normal (pointing toward the
@@ -2588,7 +2901,8 @@ bool compute_cycle_separating_direction(
     const std::vector<Cell_handle>& cell_by_index,
     const Delaunay& dt,
     int cycle_index,
-    float separation_direction[3]
+    float separation_direction[3],
+    const std::string& trace_suffix
 ) {
     if (v0 == Vertex_handle()) {
         return false;
@@ -2632,7 +2946,7 @@ bool compute_cycle_separating_direction(
     const CycleFoldoverEdgeInfo crossover_edge_dir = detect_cycle_crossover_edge_direction(
         v0, cycle_facets, cell_by_index, dt, &foldover_edge_candidates_ge4);
 
-    // FacetNormalDumpEntry is now in vdc_debug.h.
+
     using vdc_debug::FacetNormalDumpEntry;
 
     std::vector<FacetNormalDumpEntry> dump_entries;
@@ -2829,7 +3143,7 @@ bool compute_cycle_separating_direction(
         dump_ctx.crossover_dir_y = crossover_edge_dir.unit_dir.y();
         dump_ctx.crossover_dir_z = crossover_edge_dir.unit_dir.z();
         dump_ctx.normals_as_points = &normals_as_points;
-        vdc_debug::dump_sep_dir_normals_trace(trace_dir, dump_ctx, dump_entries);
+        vdc_debug::dump_sep_dir_normals_trace(trace_dir, dump_ctx, dump_entries, trace_suffix);
     }
 
     // If center is very close to origin, normals span all directions - no separation
@@ -3943,6 +4257,17 @@ static std::vector<Vertex_handle> initialize_cycle_isovertices(
                     if (!skip_sep_dir_for_foldover) {
                         plan.has_sep_dir = compute_cycle_separating_direction(
                             vit, cycles[c], cell_by_index, dt, static_cast<int>(c), plan.sep_dir);
+
+                        // If no valid direction found, try simplifying the cycle
+                        // (eliminating co-tet facet pairs) and retry.
+                        if (!plan.has_sep_dir) {
+                            const auto simplified = simplify_cycle_facets(
+                                vit, cycles[c], cell_by_index, dt, static_cast<int>(c));
+                            if (simplified.size() < cycles[c].size()) {
+                                plan.has_sep_dir = compute_cycle_separating_direction(
+                                    vit, simplified, cell_by_index, dt, static_cast<int>(c), plan.sep_dir, "_final");
+                            }
+                        }
                     }
 
                     if (move_cap) {
