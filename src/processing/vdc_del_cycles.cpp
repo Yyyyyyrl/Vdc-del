@@ -2714,6 +2714,18 @@ static std::vector<std::pair<int,int>> simplify_cycle_facets(
         trace_out << "\n";
     };
 
+    auto compute_cycle_facet_normal = [&](int cell_idx, int facet_idx, Vector3* out_normal) -> bool {
+        Cell_handle cell = lookup_cell(cell_by_index, cell_idx);
+        if (cell == Cell_handle() || dt.is_infinite(cell)) return false;
+        if (facet_idx < 0 || facet_idx >= 4) return false;
+        Point pts[3];
+        if (!get_facet_triangle_points(dt, cell, facet_idx, pts)) return false;
+        const Vector3 normal = compute_facet_outward_normal(dt, cell, facet_idx, pts);
+        if (vec_norm(normal) < 1e-20) return false;
+        *out_normal = normal;
+        return true;
+    };
+
     std::vector<std::pair<int,int>> result = cycle_facets;
     bool changed = true;
     int iteration = 0;
@@ -2745,8 +2757,10 @@ static std::vector<std::pair<int,int>> simplify_cycle_facets(
             mirror_cell_to_facet_indices[mc_idx].push_back(i);
         }
 
-        // Find a VALID pair: co-tet, not in other cycle, and replacement facet is isosurface.
-        // Try all candidate pairs until one fully validates.
+        // Find a valid pair: co-tet, not in other cycle.
+        // Choose the replacement facet orientation that best matches the normals
+        // of the two facets being merged, while falling back to the old
+        // positive-cell preference when the comparison is ambiguous.
         int replace_i = -1, replace_j = -1;
         Cell_handle shared_tet;
         int new_cell_idx = -1, new_facet_idx = -1;
@@ -2779,22 +2793,73 @@ static std::vector<std::pair<int,int>> simplify_cycle_facets(
                     }
                     if (repl_fi < 0) continue;
 
-                    // Convert to positive-cell convention.
-                    int cand_new_cell_idx, cand_new_facet_idx;
+                    struct ReplacementOption {
+                        int cell_idx = -1;
+                        int facet_idx = -1;
+                        Vector3 normal = Vector3(0, 0, 0);
+                    };
+
+                    std::array<ReplacementOption, 2> options;
+                    int option_count = 0;
+                    auto append_option = [&](Cell_handle option_cell, int option_fi) {
+                        if (option_cell == Cell_handle() || dt.is_infinite(option_cell)) return;
+                        if (option_fi < 0 || option_fi >= 4) return;
+                        const int option_cell_idx = option_cell->info().index;
+                        for (int opt = 0; opt < option_count; ++opt) {
+                            if (options[static_cast<size_t>(opt)].cell_idx == option_cell_idx &&
+                                options[static_cast<size_t>(opt)].facet_idx == option_fi) {
+                                return;
+                            }
+                        }
+                        Vector3 option_normal;
+                        if (!compute_cycle_facet_normal(option_cell_idx, option_fi, &option_normal)) return;
+                        options[static_cast<size_t>(option_count)].cell_idx = option_cell_idx;
+                        options[static_cast<size_t>(option_count)].facet_idx = option_fi;
+                        options[static_cast<size_t>(option_count)].normal = option_normal;
+                        ++option_count;
+                    };
+
+                    const Facet replacement_facet(cand_tet, repl_fi);
+                    const Facet replacement_mirror = dt.mirror_facet(replacement_facet);
                     if (cand_tet->info().flag_positive) {
-                        cand_new_cell_idx = cand_tet->info().index;
-                        cand_new_facet_idx = repl_fi;
+                        append_option(cand_tet, repl_fi);
+                        append_option(replacement_mirror.first, replacement_mirror.second);
                     } else {
-                        const Facet mirrored = dt.mirror_facet(Facet(cand_tet, repl_fi));
-                        if (mirrored.first == Cell_handle() || dt.is_infinite(mirrored.first)) continue;
-                        cand_new_cell_idx = mirrored.first->info().index;
-                        cand_new_facet_idx = mirrored.second;
+                        append_option(replacement_mirror.first, replacement_mirror.second);
+                        append_option(cand_tet, repl_fi);
+                    }
+                    if (option_count == 0) continue;
+
+                    Vector3 reference_normal(0, 0, 0);
+                    bool has_reference_normal = false;
+                    Vector3 merged_normal;
+                    if (compute_cycle_facet_normal(fi.first, fi.second, &merged_normal)) {
+                        reference_normal = reference_normal + merged_normal;
+                        has_reference_normal = true;
+                    }
+                    if (compute_cycle_facet_normal(fj.first, fj.second, &merged_normal)) {
+                        reference_normal = reference_normal + merged_normal;
+                        has_reference_normal = true;
                     }
 
-                    // Basic validity check on the replacement facet cell.
-                    Cell_handle new_cell = lookup_cell(cell_by_index, cand_new_cell_idx);
-                    if (new_cell == Cell_handle() || dt.is_infinite(new_cell)) continue;
-                    if (cand_new_facet_idx < 0 || cand_new_facet_idx >= 4) continue;
+                    int best_option = 0;
+                    if (has_reference_normal && vec_norm(reference_normal) >= 1e-12 && option_count > 1) {
+                        double best_score =
+                            vec_dot(options[0].normal, reference_normal);
+                        for (int opt = 1; opt < option_count; ++opt) {
+                            const double score =
+                                vec_dot(options[static_cast<size_t>(opt)].normal, reference_normal);
+                            if (score > best_score) {
+                                best_score = score;
+                                best_option = opt;
+                            }
+                        }
+                    }
+
+                    const int cand_new_cell_idx =
+                        options[static_cast<size_t>(best_option)].cell_idx;
+                    const int cand_new_facet_idx =
+                        options[static_cast<size_t>(best_option)].facet_idx;
 
                     // All validation passed — accept this pair.
                     replace_i = ii;
